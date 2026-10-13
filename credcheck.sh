@@ -7,6 +7,24 @@
 
 set -u
 set -o pipefail
+
+# Kolory ANSI — wyłączane automatycznie gdy stdout nie jest terminalem
+if [[ -t 1 ]]; then
+  C_RESET='\033[0m'
+  C_BOLD='\033[1m'
+  C_RED='\033[1;31m'
+  C_GREEN='\033[1;32m'
+  C_YELLOW='\033[1;33m'
+  C_CYAN='\033[1;36m'
+  C_WHITE='\033[1;37m'
+  C_BG_GREEN='\033[42m'
+  C_BG_YELLOW='\033[43m'
+  C_DIM='\033[2m'
+else
+  C_RESET='' C_BOLD='' C_RED='' C_GREEN='' C_YELLOW=''
+  C_CYAN='' C_WHITE='' C_BG_GREEN='' C_BG_YELLOW='' C_DIM=''
+fi
+
 target="" user="" pass="" user_set=0 pass_set=0
 max_attempts=15 delay_min=1 delay_max=3 protocols_arg="" output_file="" auto_yes=0
 
@@ -82,16 +100,26 @@ command -v nxc >/dev/null 2>&1 || { echo "Błąd: brak nxc w PATH." >&2; exit 1;
 if [[ -n "$output_file" ]]; then
   : > "$output_file" 2>/dev/null || { echo "Błąd: nie można zapisać logu: $output_file" >&2; exit 1; }
 fi
-log() { printf '%s\n' "$1"; [[ -n "$output_file" ]] && printf '%s\n' "$1" >> "$output_file"; }
+# log: drukuje na ekran (z kolorami ANSI), do pliku bez kolorów
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' <<< "$1"; }
+log() {
+  printf '%b\n' "$1"
+  [[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$1")" >> "$output_file"
+}
+clog() {
+  # clog <kolor> <tekst> — kolorowa linia
+  printf '%b\n' "${1}${2}${C_RESET}"
+  [[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$2")" >> "$output_file"
+}
 
-echo ">>> Nmap sprawdza w tle porty TCP: $port_list"
-echo ">>> Cel: $target"
+clog "$C_CYAN" ">>> Nmap sprawdza w tle porty TCP: $port_list"
+clog "$C_CYAN" ">>> Cel: $target"
 scan_tmp="$(mktemp)" || exit 1
 trap 'rm -f "$scan_tmp"' EXIT
 nmap -n -Pn -sT --open -p "$port_list" -oG - "$target" >"$scan_tmp" 2>&1 &
 nmap_pid=$!
 wait "$nmap_pid"; nmap_rc=$?
-if ((nmap_rc != 0)); then echo "Błąd Nmap (kod $nmap_rc):" >&2; cat "$scan_tmp" >&2; exit 1; fi
+if ((nmap_rc != 0)); then printf '%b\n' "${C_RED}Błąd Nmap (kod $nmap_rc):${C_RESET}" >&2; cat "$scan_tmp" >&2; exit 1; fi
 
 open_ports=""
 while IFS= read -r line; do
@@ -106,11 +134,11 @@ while IFS= read -r line; do
   done
 done < "$scan_tmp"
 if [[ -z "$open_ports" ]]; then
-  echo ">>> Brak wykrytych otwartych portów z wybranej listy. Nie uruchamiam nxc."
+  clog "$C_YELLOW" ">>> Brak wykrytych otwartych portów z wybranej listy. Nie uruchamiam nxc."
   [[ -n "$output_file" ]] && printf 'Cel: %s\nSkanowane porty: %s\nWynik: brak OPEN\n' "$target" "$port_list" >> "$output_file"
   exit 0
 fi
-echo ">>> Otwarte porty TCP: $open_ports"
+clog "$C_GREEN" ">>> Otwarte porty TCP: $open_ports"
 
 declare -a active_protocols=()
 for proto in "${protocols[@]}"; do
@@ -124,7 +152,7 @@ for proto in "${protocols[@]}"; do
       [[ ",$open_ports," == *",$port,"* ]] && found=1
     fi
   done
-  if ((found)); then active_protocols+=("$proto"); else echo ">>> Pomijam $proto — przypisane porty nie są OPEN."; fi
+  if ((found)); then active_protocols+=("$proto"); else clog "$C_DIM" ">>> Pomijam $proto — przypisane porty nie są OPEN."; fi
 done
 ((${#active_protocols[@]})) || { echo ">>> Nic do sprawdzenia."; exit 0; }
 protocols=("${active_protocols[@]}")
@@ -153,16 +181,16 @@ literal_replace() {
   printf '%s' "$text"
 }
 
-log "Tryb: $mode"; log "Cel: $target"; log "Otwarte porty: $open_ports"; log "Protokoły po filtracji: ${protocols[*]}"
-log "Wywołania nxc: $run_count z $planned"; log "Opóźnienie: ${delay_min}-${delay_max}s"
-[[ -n "$output_file" ]] && log "Log: $output_file (hasła maskowane)"
+log "${C_CYAN}Tryb:${C_RESET} $mode"; log "${C_CYAN}Cel:${C_RESET} $target"; log "${C_CYAN}Otwarte porty:${C_RESET} $open_ports"; log "${C_CYAN}Protokoły po filtracji:${C_RESET} ${protocols[*]}"
+log "${C_CYAN}Wywołania nxc:${C_RESET} $run_count z $planned"; log "${C_CYAN}Opóźnienie:${C_RESET} ${delay_min}-${delay_max}s"
+[[ -n "$output_file" ]] && log "${C_CYAN}Log:${C_RESET} $output_file (hasła maskowane)"
 declare -a rows=()
 attempt=0
 for proto in "${protocols[@]}"; do
   for idx in "${!users[@]}"; do
     ((attempt < run_count)) || break
     u="${users[$idx]}"; p="${passwords[$idx]}"; pm="$(mask_pass "$p")"; ((attempt+=1))
-    log "######### [$attempt/$run_count] $proto -- $u:$pm #########"
+    log "${C_BOLD}${C_WHITE}######### [$attempt/$run_count] $proto -- $u:$pm #########${C_RESET}"
     start=$(date +%s); output=$(nxc "$proto" "$target" -u "$u" -p "$p" 2>&1); rc=$?; end=$(date +%s)
     masked="$output"
     [[ -n "$p" ]] && masked="$(literal_replace "$masked" "$p" "$pm")"
@@ -185,15 +213,39 @@ for proto in "${protocols[@]}"; do
   ((attempt >= run_count)) && break
 done
 if ((planned > run_count)); then log "Zatrzymano po $run_count wywołaniach; pominięto $((planned-run_count)) kombinacji."; fi
-log "=================================================================="; log "PODSUMOWANIE"
-log "$(printf '%-8s %-25s %-32s %-8s %-s' PROTO CREDS STATUS CZAS INFO)"
+log "${C_BOLD}${C_CYAN}==================================================================${C_RESET}"
+log "${C_BOLD}${C_WHITE}                        PODSUMOWANIE${C_RESET}"
+log "${C_BOLD}${C_CYAN}==================================================================${C_RESET}"
+header="$(printf '%-8s %-25s %-32s %-8s %-s' PROTO CREDS STATUS CZAS INFO)"
+log "${C_BOLD}${C_WHITE}${header}${C_RESET}"
+log "${C_DIM}$(printf '%0.s─' {1..85})${C_RESET}"
 confirmed=0 uncertain=0
 for row in "${rows[@]}"; do
   IFS='|' read -r proto creds status elapsed info <<< "$row"
-  log "$(printf '%-8s %-25s %-32s %-8s %-s' "$proto" "$creds" "$status" "$elapsed" "$info")"
-  [[ "$status" == "SUKCES - WZORZEC POTWIERDZONY" ]] && ((confirmed+=1))
-  [[ "$status" == "MOŻLIWY SUKCES - WYMAGA WERYFIKACJI" ]] && ((uncertain+=1))
+  line="$(printf '%-8s %-25s %-32s %-8s %-s' "$proto" "$creds" "$status" "$elapsed" "$info")"
+  if [[ "$status" == "SUKCES - WZORZEC POTWIERDZONY" ]]; then
+    log "${C_BG_GREEN}${C_WHITE}${C_BOLD}${line}${C_RESET}"
+    ((confirmed+=1))
+  elif [[ "$status" == "MOŻLIWY SUKCES - WYMAGA WERYFIKACJI" ]]; then
+    log "${C_BG_YELLOW}${C_BOLD}${line}${C_RESET}"
+    ((uncertain+=1))
+  elif [[ "$status" == "ODRZUCONO / BRAK SUKCESU" ]]; then
+    log "${C_RED}${line}${C_RESET}"
+  elif [[ "$status" == "BRAK POŁĄCZENIA" ]] || [[ "$status" == "BŁĄD NXC" ]]; then
+    log "${C_DIM}${line}${C_RESET}"
+  else
+    log "$line"
+  fi
 done
-log "Sukcesy z potwierdzonym wzorcem: $confirmed / ${#rows[@]}"
-log "Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / ${#rows[@]}"
-log 'Uwaga: znaczenie "[+]" różni się między protokołami; weryfikuj wyniki ręcznie.'
+log "${C_DIM}$(printf '%0.s─' {1..85})${C_RESET}"
+if ((confirmed > 0)); then
+  log "${C_BG_GREEN}${C_WHITE}${C_BOLD} ✔ Sukcesy z potwierdzonym wzorcem: $confirmed / ${#rows[@]} ${C_RESET}"
+else
+  log "${C_DIM}  Sukcesy z potwierdzonym wzorcem: $confirmed / ${#rows[@]}${C_RESET}"
+fi
+if ((uncertain > 0)); then
+  log "${C_BG_YELLOW}${C_BOLD} ⚠ Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / ${#rows[@]} ${C_RESET}"
+else
+  log "${C_DIM}  Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / ${#rows[@]}${C_RESET}"
+fi
+log "${C_CYAN}Uwaga:${C_RESET} znaczenie \"[+]\" różni się między protokołami; weryfikuj wyniki ręcznie."
