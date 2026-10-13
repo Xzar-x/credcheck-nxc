@@ -114,8 +114,6 @@ else
   protocols=(smb ssh ftp winrm mssql rdp ldap wmi nfs vnc)
 fi
 
-# Login i hasło są przechowywane w osobnych tablicach, więc spacje/puste hasła
-# nie powodują rozdzielania jednej pary na kilka pól.
 declare -a users=() passwords=()
 if (( user_set == 1 && pass_set == 1 )); then
   mode="Test podanych poświadczeń"
@@ -165,7 +163,6 @@ mask_pass() {
   fi
 }
 
-# Dosłowna podmiana sekretu w tekście bez traktowania znaków hasła jako wzorca glob.
 literal_replace() {
   local text="$1" needle="$2" replacement="$3" before rest
   [[ -z "$needle" ]] && { printf '%s' "$text"; return; }
@@ -220,7 +217,6 @@ for proto in "${protocols[@]}"; do
     if [[ -n "$p" ]]; then
       masked_output="$(literal_replace "$masked_output" "$p" "$p_masked")"
     fi
-    # Maskowanie poświadczeń podanych w trybie blind również obejmuje znane hasła
     for secret in "${passwords[@]}"; do
       if [[ -n "$secret" ]]; then
         masked_output="$(literal_replace "$masked_output" "$secret" "$(mask_pass "$secret")")"
@@ -229,7 +225,6 @@ for proto in "${protocols[@]}"; do
     log "$masked_output"
     log ""
 
-    # To są heurystyki oparte na typowych markerach NetExec, nie dowód uniwersalny.
     status="NIEZNANY"
     error_info=""
     if echo "$output" | grep -qiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable|could not connect'; then
@@ -238,8 +233,13 @@ for proto in "${protocols[@]}"; do
     elif (( exit_code != 0 )); then
       status="BŁĄD NXC"
       error_info="exit code $exit_code"
-    elif echo "$output" | grep -qE '\[\+\].*(Pwn3d!|logged in|Login successful|authenticated)'; then
+    elif echo "$output" | grep -qiE '\[\+\].*(Pwn3d!|logged in|login successful|authenticated|anonymous login)'; then
       status="PRAWDOPODOBNY SUKCES"
+    elif echo "$output" | grep -qE '\[\+\]'; then
+      # [+] bez rozpoznanego słowa kluczowego - prawdopodobny sukces (konwencja
+      # nxc: [+] = udana autoryzacja), ale wymaga ręcznego potwierdzenia, bo nie
+      # pasuje do znanych wzorców.
+      status="SUKCES (NIEPOTWIERDZONY WZORZEC)"
     elif echo "$output" | grep -qE '\[-\]'; then
       status="ODRZUCONO / BRAK SUKCESU"
     fi
@@ -247,7 +247,6 @@ for proto in "${protocols[@]}"; do
     summary_rows+=("$proto|$u:$p_masked|$status|${elapsed}s|$error_info")
 
     if (( attempt_count < run_attempts )); then
-      # Bash RANDOM dostarcza nowe ziarno dla każdego opóźnienia.
       delay=$(awk -v r="$RANDOM" -v min="$delay_min" -v max="$delay_max" \
         'BEGIN {srand(r); printf "%.2f", min + rand() * (max - min)}')
       log "Czekam ${delay}s przed kolejnym wywołaniem..."
@@ -273,7 +272,7 @@ success_count=0
 for row in "${summary_rows[@]}"; do
   IFS='|' read -r proto creds_s status elapsed info <<< "$row"
   log "$(printf '%-8s %-25s %-24s %-8s %-s' "$proto" "$creds_s" "$status" "$elapsed" "$info")"
-  [[ "$status" == "PRAWDOPODOBNY SUKCES" ]] && success_count=$((success_count + 1))
+  [[ "$status" == "PRAWDOPODOBNY SUKCES" || "$status" == "SUKCES (NIEPOTWIERDZONY WZORZEC)" ]] && success_count=$((success_count + 1))
 done
 
 log ""
