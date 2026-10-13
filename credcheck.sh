@@ -17,7 +17,7 @@ if [[ -t 1 ]]; then
   C_YELLOW='\033[1;33m'
   C_CYAN='\033[1;36m'
   C_WHITE='\033[1;37m'
-  C_BG_GREEN='\033[42m'
+  C_BG_GREEN='\033[48;5;22m'
   C_BG_YELLOW='\033[43m'
   C_DIM='\033[2m'
 else
@@ -26,7 +26,7 @@ else
 fi
 
 target="" user="" pass="" user_set=0 pass_set=0
-max_attempts=15 delay_min=1 delay_max=3 protocols_arg="" output_file="" auto_yes=0
+max_attempts=15 delay_min=0 delay_max=0.3 protocols_arg="" output_file="" auto_yes=0
 
 help() {
   cat <<'HELP'
@@ -37,8 +37,8 @@ dla protokołów, dla których znaleziono przypisany port OPEN.
 -u, --user          nazwa użytkownika
 -p, --pass          hasło (może być puste: -p "")
 -m, --max-attempts  maks. liczba wywołań nxc (domyślnie 15)
---delay-min         minimalne opóźnienie w sekundach (domyślnie 1)
---delay-max         maksymalne opóźnienie w sekundach (domyślnie 3)
+--delay-min         minimalne opóźnienie w sekundach (domyślnie 0)
+--delay-max         maksymalne opóźnienie w sekundach (domyślnie 0.3)
 --protocols         protokoły oddzielone przecinkami
 -o, --output        plik logu; poświadczenia maskowane w wyjściu nxc
 -y, --yes           pomiń potwierdzenie przy przekroczeniu limitu
@@ -337,15 +337,21 @@ if ((${#valid_indices[@]} > 0)); then
             echo "  sudo apt update && sudo apt install -y smbclient"
           fi
           ;;
-        ftp)
-          if command -v ftp >/dev/null 2>&1; then
-            clog "$C_GREEN" "Uruchamiam ftp..."
-            ftp "$target"
-          else
-            clog "$C_RED" "Błąd: Narzędzie 'ftp' nie zostało znalezione w PATH."
-            clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt install inetutils-ftp"
-          fi
-          ;;
+          ftp)
+          if ! command -v lftp >/dev/null 2>&1; then
+            clog "$C_RED" "Błąd: Narzędzie 'lftp' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt update && sudo apt install -y lftp"
+            else
+              clog "$C_GREEN" "Uruchamiam lftp (auto‑login, sesja interaktywna)..."
+              if [[ -n "$s_user" ]]; then
+                # jeśli masz usera, logujemy z hasłem
+                lftp -u "$s_user","$s_pass" "$target"
+                else
+                  # brak usera – zwykłe połączenie (np. pure anonymous)
+                  lftp "$target"
+                  fi
+                  fi
+                  ;;
         vnc)
           if command -v vncviewer >/dev/null 2>&1; then
             clog "$C_GREEN" "Uruchamiam vncviewer..."
