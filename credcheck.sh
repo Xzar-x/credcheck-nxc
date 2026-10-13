@@ -9,13 +9,15 @@
 #   -t, --target        IP/host celu (wymagane)
 #   -u, --user           nazwa użytkownika
 #   -p, --pass            hasło
-#   -m, --max-attempts   limit prób przed potwierdzeniem (domyślnie 15)
+#   -m, --max-attempts   TWARDY limit prób - skrypt zatrzyma się po jego osiągnięciu (domyślnie 15)
 #   --delay-min           minimalne opóźnienie między próbami w sek. (domyślnie 1)
 #   --delay-max           maksymalne opóźnienie między próbami w sek. (domyślnie 3)
 #   --protocols           lista protokołów oddzielona przecinkami (domyślnie wszystkie)
-#   -o, --output          zapisz pełny log do pliku
-#   -y, --yes             nie pytaj o potwierdzenie przy przekroczeniu limitu
+#   -o, --output          zapisz pełny log do pliku (hasła maskowane)
+#   -y, --yes             nie pytaj o potwierdzenie, gdy planowanych prób jest więcej niż limit
 #   -h, --help            pokaż tę pomoc
+#
+# UWAGA: używaj wyłącznie na własnej infrastrukturze lub z wyraźną, pisemną autoryzacją.
 
 set -u
 
@@ -36,20 +38,28 @@ print_help() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--target)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       target="$2"; shift 2 ;;
     -u|--user)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       user="$2"; shift 2 ;;
     -p|--pass)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       pass="$2"; shift 2 ;;
     -m|--max-attempts)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       max_attempts="$2"; shift 2 ;;
     --delay-min)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       delay_min="$2"; shift 2 ;;
     --delay-max)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       delay_max="$2"; shift 2 ;;
     --protocols)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       protocols_arg="$2"; shift 2 ;;
     -o|--output)
+      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
       output_file="$2"; shift 2 ;;
     -y|--yes)
       auto_yes=1; shift ;;
@@ -63,8 +73,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$target" ]]; then
-  echo "Błąd: brak celu."
+  echo "Błąd: brak celu (-t/--target)."
   echo "Użyj -h / --help, żeby zobaczyć składnię."
+  exit 1
+fi
+
+if ! [[ "$max_attempts" =~ ^[0-9]+$ ]] || (( max_attempts < 1 )); then
+  echo "Błąd: --max-attempts musi być liczbą całkowitą >= 1."
   exit 1
 fi
 
@@ -86,34 +101,24 @@ else
     "'' ''"
     "guest guest"
     "guest ''"
+    "null null"
   )
 fi
 
-total_attempts=$(( ${#protocols[@]} * ${#creds[@]} ))
+planned_attempts=$(( ${#protocols[@]} * ${#creds[@]} ))
 
-echo ">>> Tryb: $mode"
-echo ">>> Cel: $target"
-echo ">>> Protokoły: ${protocols[*]}"
-echo ">>> Planowanych prób: $total_attempts (limit: $max_attempts)"
-echo ">>> Opóźnienie między próbami: ${delay_min}-${delay_max}s (jitter)"
-[[ -n "$output_file" ]] && echo ">>> Log zapisywany do: $output_file"
-echo
-
-if [[ -n "$output_file" ]]; then
-  : > "$output_file"
-fi
-
-log() {
-  echo "$1"
-  [[ -n "$output_file" ]] && echo "$1" >> "$output_file"
-}
-
-if (( total_attempts > max_attempts )); then
-  echo "⚠️  UWAGA: planowana liczba prób ($total_attempts) przekracza limit ($max_attempts)."
-  echo "   Na środowiskach z polityką lockoutu może to zablokować testowane konto"
-  echo "   lub wywołać alarmy/throttling po stronie usługi."
+# Jeśli plan przekracza limit, pytamy o zgodę; po zgodzie TWARDO tniemy do limitu.
+run_attempts=$planned_attempts
+if (( planned_attempts > max_attempts )); then
+  echo ">>> Tryb: $mode"
+  echo ">>> Cel: $target"
+  echo ">>> Planowanych prób (wszystkie kombinacje): $planned_attempts"
+  echo "⚠️  UWAGA: przekracza to ustawiony limit ($max_attempts)."
+  echo "   Na środowiskach z polityką lockoutu zbyt wiele prób może zablokować"
+  echo "   testowane konto lub wywołać alarmy/throttling po stronie usługi."
+  echo "   Skrypt wykona maksymalnie $max_attempts prób i się zatrzyma."
   if (( auto_yes == 0 )); then
-    read -p "   Kontynuować mimo to? [t/N]: " confirm
+    read -p "   Kontynuować z tym twardym limitem? [t/N]: " confirm
     if [[ ! "$confirm" =~ ^[TtYy]$ ]]; then
       echo "Przerwano przez użytkownika."
       exit 1
@@ -121,24 +126,66 @@ if (( total_attempts > max_attempts )); then
   else
     echo "   (--yes podane, kontynuuję automatycznie)"
   fi
+  run_attempts=$max_attempts
   echo
 fi
 
+echo ">>> Tryb: $mode"
+echo ">>> Cel: $target"
+echo ">>> Protokoły: ${protocols[*]}"
+echo ">>> Próby do wykonania: $run_attempts (z $planned_attempts możliwych, twardy limit: $max_attempts)"
+echo ">>> Opóźnienie między próbami: ${delay_min}-${delay_max}s (jitter)"
+[[ -n "$output_file" ]] && echo ">>> Log zapisywany do: $output_file (hasła maskowane)"
+echo
+
+# Sprawdzamy dostępność nxc PRZED jakimkolwiek dotknięciem systemu plików (output_file)
 if ! command -v nxc >/dev/null 2>&1; then
   echo "❌ Błąd: 'nxc' nie jest zainstalowany lub nie jest w PATH."
   echo "   Jeśli korzystasz z venv, aktywuj je najpierw (np. komendą 'bb')."
   exit 1
 fi
 
+# Dopiero teraz, po walidacji wszystkiego, dotykamy pliku wyjściowego
+if [[ -n "$output_file" ]]; then
+  if ! : > "$output_file" 2>/dev/null; then
+    echo "❌ Błąd: nie można utworzyć/wyczyścić pliku logu: $output_file"
+    exit 1
+  fi
+fi
+
+# Maskowanie hasła do logów/podsumowania: pokazujemy tylko długość i gwiazdki
+mask_pass() {
+  local p="$1" len
+  len=${#p}
+  if (( len == 0 )); then
+    echo "(puste)"
+  else
+    printf '*%.0s' $(seq 1 "$len")
+  fi
+}
+
+log() {
+  echo "$1"
+  [[ -n "$output_file" ]] && echo "$1" >> "$output_file"
+}
+
 declare -a summary_rows=()
 attempt_count=0
 
+outer_break=0
 for proto in "${protocols[@]}"; do
+  (( outer_break == 1 )) && break
   for cred in "${creds[@]}"; do
+    if (( attempt_count >= run_attempts )); then
+      outer_break=1
+      break
+    fi
+
     read -r u p <<< "$cred"
     attempt_count=$((attempt_count + 1))
+    p_masked=$(mask_pass "$p")
 
-    log "######### [$attempt_count/$total_attempts] $proto -- $u:$p #########"
+    log "######### [$attempt_count/$run_attempts] $proto -- $u:$p_masked #########"
 
     start_ts=$(date +%s.%N)
     output=$(nxc "$proto" "$target" -u "$u" -p "$p" 2>&1)
@@ -146,7 +193,13 @@ for proto in "${protocols[@]}"; do
     end_ts=$(date +%s.%N)
     elapsed=$(awk "BEGIN {printf \"%.2f\", $end_ts - $start_ts}")
 
-    log "$output"
+    # Maskujemy hasło także w surowym outpucie nxc, zanim trafi do logu
+    if [[ -n "$p" ]]; then
+      masked_output="${output//$p/$p_masked}"
+    else
+      masked_output="$output"
+    fi
+    log "$masked_output"
     log ""
 
     status="BŁĄD NARZĘDZIA"
@@ -166,9 +219,9 @@ for proto in "${protocols[@]}"; do
       status="NIEZNANY"
     fi
 
-    summary_rows+=("$proto|$u:$p|$status|${elapsed}s|$error_info")
+    summary_rows+=("$proto|$u:$p_masked|$status|${elapsed}s|$error_info")
 
-    if (( attempt_count < total_attempts )); then
+    if (( attempt_count < run_attempts )); then
       delay=$(awk -v min="$delay_min" -v max="$delay_max" 'BEGIN{srand(); printf "%.2f", min+rand()*(max-min)}')
       log "⏳ Czekam ${delay}s przed kolejną próbą..."
       sleep "$delay"
@@ -177,11 +230,16 @@ for proto in "${protocols[@]}"; do
   done
 done
 
+if (( planned_attempts > run_attempts )); then
+  log "ℹ️  Zatrzymano po $run_attempts próbach (twardy limit --max-attempts)."
+  log "   Pozostało niewykonanych kombinacji: $(( planned_attempts - run_attempts ))"
+  log ""
+fi
+
 log "=================================================================="
 log " PODSUMOWANIE"
 log "=================================================================="
-summary_header=$(printf "%-8s %-25s %-16s %-8s %-s" "PROTO" "CREDS" "STATUS" "CZAS" "INFO")
-log "$summary_header"
+log "$(printf "%-8s %-25s %-16s %-8s %-s" "PROTO" "CREDS" "STATUS" "CZAS" "INFO")"
 log "$(printf "%-8s %-25s %-16s %-8s %-s" "-----" "-----" "------" "----" "----")"
 
 success_count=0
@@ -194,7 +252,7 @@ done
 log ""
 log ">>> Udane logowania: $success_count / ${#summary_rows[@]}"
 if (( success_count > 0 )); then
-  log ">>> Sukcesy:"
+  log ">>> Sukcesy (hasła zamaskowane w logu - sprawdź pełny output nxc powyżej przy potrzebie):"
   for row in "${summary_rows[@]}"; do
     IFS='|' read -r proto creds_s status elapsed info <<< "$row"
     [[ "$status" == "SUKCES" ]] && log "    - $proto -> $creds_s"
