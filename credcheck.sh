@@ -1,29 +1,32 @@
-#!/bin/bash
-# credcheck.sh - testowanie danych uwierzytelniających na wielu protokołach przez nxc (NetExec)
+#!/usr/bin/env bash
+# credcheck.sh - sprawdzanie uwierzytelniania przez NetExec (nxc)
 #
 # Użycie:
 #   ./credcheck.sh -t <target> -u <user> -p <pass> [opcje]
-#   ./credcheck.sh -t <target> [opcje]              # tryb blind (anonymous/guest/null)
+#   ./credcheck.sh -t <target> [opcje]  # zestaw prób anonymous/guest/null
 #
 # Opcje:
 #   -t, --target        IP/host celu (wymagane)
-#   -u, --user           nazwa użytkownika
-#   -p, --pass            hasło
-#   -m, --max-attempts   TWARDY limit prób - skrypt zatrzyma się po jego osiągnięciu (domyślnie 15)
-#   --delay-min           minimalne opóźnienie między próbami w sek. (domyślnie 1)
-#   --delay-max           maksymalne opóźnienie między próbami w sek. (domyślnie 3)
-#   --protocols           lista protokołów oddzielona przecinkami (domyślnie wszystkie)
-#   -o, --output          zapisz pełny log do pliku (hasła maskowane)
-#   -y, --yes             nie pytaj o potwierdzenie, gdy planowanych prób jest więcej niż limit
-#   -h, --help            pokaż tę pomoc
+#   -u, --user          nazwa użytkownika
+#   -p, --pass          hasło (może być puste: -p "")
+#   -m, --max-attempts  maksymalna liczba WYWOŁAŃ nxc (domyślnie 15)
+#   --delay-min         minimalne opóźnienie w sekundach (domyślnie 1)
+#   --delay-max         maksymalne opóźnienie w sekundach (domyślnie 3)
+#   --protocols         protokoły oddzielone przecinkami
+#   -o, --output        plik logu; hasła maskowane w zapisanym wyjściu
+#   -y, --yes           pomiń potwierdzenie, gdy plan przekracza limit
+#   -h, --help          pokaż pomoc
 #
-# UWAGA: używaj wyłącznie na własnej infrastrukturze lub z wyraźną, pisemną autoryzacją.
+# UWAGA: używaj wyłącznie na własnej infrastrukturze lub z autoryzacją.
 
 set -u
+set -o pipefail
 
 target=""
 user=""
 pass=""
+user_set=0
+pass_set=0
 max_attempts=15
 delay_min=1
 delay_max=3
@@ -35,226 +38,244 @@ print_help() {
   awk '/^#!/{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
 }
 
+need_value() {
+  if [[ $# -lt 2 ]]; then
+    echo "Błąd: $1 wymaga wartości." >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--target)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      target="$2"; shift 2 ;;
+      need_value "$@"; target="$2"; shift 2 ;;
     -u|--user)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      user="$2"; shift 2 ;;
+      need_value "$@"; user="$2"; user_set=1; shift 2 ;;
     -p|--pass)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      pass="$2"; shift 2 ;;
+      need_value "$@"; pass="$2"; pass_set=1; shift 2 ;;
     -m|--max-attempts)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      max_attempts="$2"; shift 2 ;;
+      need_value "$@"; max_attempts="$2"; shift 2 ;;
     --delay-min)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      delay_min="$2"; shift 2 ;;
+      need_value "$@"; delay_min="$2"; shift 2 ;;
     --delay-max)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      delay_max="$2"; shift 2 ;;
+      need_value "$@"; delay_max="$2"; shift 2 ;;
     --protocols)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      protocols_arg="$2"; shift 2 ;;
+      need_value "$@"; protocols_arg="$2"; shift 2 ;;
     -o|--output)
-      if [[ $# -lt 2 || "$2" == -* ]]; then echo "Błąd: $1 wymaga wartości."; exit 1; fi
-      output_file="$2"; shift 2 ;;
-    -y|--yes)
-      auto_yes=1; shift ;;
-    -h|--help)
-      print_help; exit 0 ;;
-    *)
-      echo "Nieznana opcja: $1"
-      echo "Użyj -h / --help, żeby zobaczyć dostępne opcje."
-      exit 1 ;;
+      need_value "$@"; output_file="$2"; shift 2 ;;
+    -y|--yes) auto_yes=1; shift ;;
+    -h|--help) print_help; exit 0 ;;
+    *) echo "Nieznana opcja: $1" >&2; echo "Użyj -h / --help." >&2; exit 1 ;;
   esac
 done
 
 if [[ -z "$target" ]]; then
-  echo "Błąd: brak celu (-t/--target)."
-  echo "Użyj -h / --help, żeby zobaczyć składnię."
+  echo "Błąd: brak celu (-t/--target)." >&2
   exit 1
 fi
 
-if ! [[ "$max_attempts" =~ ^[0-9]+$ ]] || (( max_attempts < 1 )); then
-  echo "Błąd: --max-attempts musi być liczbą całkowitą >= 1."
+if ! [[ "$max_attempts" =~ ^[0-9]+$ ]] || (( 10#$max_attempts < 1 )); then
+  echo "Błąd: --max-attempts musi być liczbą całkowitą >= 1." >&2
+  exit 1
+fi
+max_attempts=$((10#$max_attempts))
+
+valid_number() {
+  [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+if ! valid_number "$delay_min" || ! valid_number "$delay_max"; then
+  echo "Błąd: opóźnienia muszą być nieujemnymi liczbami." >&2
+  exit 1
+fi
+if ! awk -v a="$delay_min" -v b="$delay_max" 'BEGIN {exit !(a <= b)}'; then
+  echo "Błąd: --delay-min nie może być większe niż --delay-max." >&2
+  exit 1
+fi
+
+if (( user_set != pass_set )); then
+  echo "Błąd: podaj jednocześnie -u i -p albo pomiń oba, aby użyć trybu blind." >&2
   exit 1
 fi
 
 if [[ -n "$protocols_arg" ]]; then
   IFS=',' read -r -a protocols <<< "$protocols_arg"
+  if (( ${#protocols[@]} == 0 )); then
+    echo "Błąd: lista protokołów jest pusta." >&2
+    exit 1
+  fi
+  for i in "${!protocols[@]}"; do
+    protocols[$i]="${protocols[$i]//[[:space:]]/}"
+    if [[ -z "${protocols[$i]}" ]]; then
+      echo "Błąd: pusta nazwa protokołu w --protocols." >&2
+      exit 1
+    fi
+  done
 else
   protocols=(smb ssh ftp winrm mssql rdp ldap wmi nfs vnc)
 fi
 
-declare -a creds=()
-if [[ -n "$user" && -n "$pass" ]]; then
-  mode="Test konkretnych credsów"
-  creds=("$user $pass")
+# Login i hasło są przechowywane w osobnych tablicach, więc spacje/puste hasła
+# nie powodują rozdzielania jednej pary na kilka pól.
+declare -a users=() passwords=()
+if (( user_set == 1 && pass_set == 1 )); then
+  mode="Test podanych poświadczeń"
+  users=("$user")
+  passwords=("$pass")
 else
-  mode="Blind test (anonymous/guest/null)"
-  creds=(
-    "anonymous anonymous"
-    "anonymous ''"
-    "'' ''"
-    "guest guest"
-    "guest ''"
-    "null null"
-  )
+  mode="Test anonymous/guest/null"
+  users=(anonymous anonymous "" guest guest null)
+  passwords=(anonymous "" "" guest "" null)
 fi
 
-planned_attempts=$(( ${#protocols[@]} * ${#creds[@]} ))
-
-# Jeśli plan przekracza limit, pytamy o zgodę; po zgodzie TWARDO tniemy do limitu.
+planned_attempts=$(( ${#protocols[@]} * ${#users[@]} ))
 run_attempts=$planned_attempts
+
 if (( planned_attempts > max_attempts )); then
-  echo ">>> Tryb: $mode"
-  echo ">>> Cel: $target"
-  echo ">>> Planowanych prób (wszystkie kombinacje): $planned_attempts"
-  echo "⚠️  UWAGA: przekracza to ustawiony limit ($max_attempts)."
-  echo "   Na środowiskach z polityką lockoutu zbyt wiele prób może zablokować"
-  echo "   testowane konto lub wywołać alarmy/throttling po stronie usługi."
-  echo "   Skrypt wykona maksymalnie $max_attempts prób i się zatrzyma."
+  echo "Plan: $planned_attempts wywołań nxc; twardy limit: $max_attempts."
+  echo "Uwaga: limit dotyczy wywołań nxc, niekoniecznie prób wewnętrznych narzędzia."
   if (( auto_yes == 0 )); then
-    read -p "   Kontynuować z tym twardym limitem? [t/N]: " confirm
+    read -r -p "Kontynuować z twardym limitem? [t/N]: " confirm
     if [[ ! "$confirm" =~ ^[TtYy]$ ]]; then
       echo "Przerwano przez użytkownika."
       exit 1
     fi
-  else
-    echo "   (--yes podane, kontynuuję automatycznie)"
   fi
   run_attempts=$max_attempts
-  echo
 fi
 
-echo ">>> Tryb: $mode"
-echo ">>> Cel: $target"
-echo ">>> Protokoły: ${protocols[*]}"
-echo ">>> Próby do wykonania: $run_attempts (z $planned_attempts możliwych, twardy limit: $max_attempts)"
-echo ">>> Opóźnienie między próbami: ${delay_min}-${delay_max}s (jitter)"
-[[ -n "$output_file" ]] && echo ">>> Log zapisywany do: $output_file (hasła maskowane)"
-echo
-
-# Sprawdzamy dostępność nxc PRZED jakimkolwiek dotknięciem systemu plików (output_file)
 if ! command -v nxc >/dev/null 2>&1; then
-  echo "❌ Błąd: 'nxc' nie jest zainstalowany lub nie jest w PATH."
-  echo "   Jeśli korzystasz z venv, aktywuj je najpierw (np. komendą 'bb')."
+  echo "Błąd: 'nxc' nie jest zainstalowany lub nie jest w PATH." >&2
   exit 1
 fi
 
-# Dopiero teraz, po walidacji wszystkiego, dotykamy pliku wyjściowego
 if [[ -n "$output_file" ]]; then
   if ! : > "$output_file" 2>/dev/null; then
-    echo "❌ Błąd: nie można utworzyć/wyczyścić pliku logu: $output_file"
+    echo "Błąd: nie można utworzyć/wyczyścić pliku logu: $output_file" >&2
     exit 1
   fi
 fi
 
-# Maskowanie hasła do logów/podsumowania: pokazujemy tylko długość i gwiazdki
 mask_pass() {
   local p="$1" len
   len=${#p}
   if (( len == 0 )); then
-    echo "(puste)"
+    printf '(puste)'
   else
-    printf '*%.0s' $(seq 1 "$len")
+    printf '%*s' "$len" '' | tr ' ' '*'
   fi
 }
 
-log() {
-  echo "$1"
-  [[ -n "$output_file" ]] && echo "$1" >> "$output_file"
+# Dosłowna podmiana sekretu w tekście bez traktowania znaków hasła jako wzorca glob.
+literal_replace() {
+  local text="$1" needle="$2" replacement="$3" before rest
+  [[ -z "$needle" ]] && { printf '%s' "$text"; return; }
+  while [[ "$text" == *"$needle"* ]]; do
+    before="${text%%"$needle"*}"
+    printf '%s%s' "$before" "$replacement"
+    rest="${text#*"$needle"}"
+    text="$rest"
+  done
+  printf '%s' "$text"
 }
+
+log() {
+  printf '%s\n' "$1"
+  if [[ -n "$output_file" ]]; then
+    printf '%s\n' "$1" >> "$output_file"
+  fi
+}
+
+echo ">>> Tryb: $mode"
+echo ">>> Cel: $target"
+echo ">>> Protokoły: ${protocols[*]}"
+echo ">>> Wywołania nxc: $run_attempts z $planned_attempts możliwych"
+echo ">>> Opóźnienie: ${delay_min}-${delay_max}s"
+[[ -n "$output_file" ]] && echo ">>> Log: $output_file (poświadczenia maskowane)"
+echo
 
 declare -a summary_rows=()
 attempt_count=0
+stop_all=0
 
-outer_break=0
 for proto in "${protocols[@]}"; do
-  (( outer_break == 1 )) && break
-  for cred in "${creds[@]}"; do
+  for idx in "${!users[@]}"; do
     if (( attempt_count >= run_attempts )); then
-      outer_break=1
+      stop_all=1
       break
     fi
 
-    read -r u p <<< "$cred"
+    u="${users[$idx]}"
+    p="${passwords[$idx]}"
+    p_masked="$(mask_pass "$p")"
     attempt_count=$((attempt_count + 1))
-    p_masked=$(mask_pass "$p")
-
     log "######### [$attempt_count/$run_attempts] $proto -- $u:$p_masked #########"
 
-    start_ts=$(date +%s.%N)
+    start_ts=$(date +%s)
     output=$(nxc "$proto" "$target" -u "$u" -p "$p" 2>&1)
     exit_code=$?
-    end_ts=$(date +%s.%N)
-    elapsed=$(awk "BEGIN {printf \"%.2f\", $end_ts - $start_ts}")
+    end_ts=$(date +%s)
+    elapsed=$((end_ts - start_ts))
 
-    # Maskujemy hasło także w surowym outpucie nxc, zanim trafi do logu
+    masked_output="$output"
     if [[ -n "$p" ]]; then
-      masked_output="${output//$p/$p_masked}"
-    else
-      masked_output="$output"
+      masked_output="$(literal_replace "$masked_output" "$p" "$p_masked")"
     fi
+    # Maskowanie poświadczeń podanych w trybie blind również obejmuje znane hasła
+    for secret in "${passwords[@]}"; do
+      if [[ -n "$secret" ]]; then
+        masked_output="$(literal_replace "$masked_output" "$secret" "$(mask_pass "$secret")")"
+      fi
+    done
     log "$masked_output"
     log ""
 
-    status="BŁĄD NARZĘDZIA"
+    # To są heurystyki oparte na typowych markerach NetExec, nie dowód uniwersalny.
+    status="NIEZNANY"
     error_info=""
-
-    if (( exit_code != 0 )); then
-      status="BŁĄD NARZĘDZIA"
-      error_info="exit code $exit_code"
-    elif echo "$output" | grep -qE '\[\+\]'; then
-      status="SUKCES"
-    elif echo "$output" | grep -qiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable'; then
+    if echo "$output" | grep -qiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable|could not connect'; then
       status="BRAK POŁĄCZENIA"
-      error_info=$(echo "$output" | grep -oiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable' | head -1)
+      error_info=$(echo "$output" | grep -oiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable|could not connect' | head -1)
+    elif (( exit_code != 0 )); then
+      status="BŁĄD NXC"
+      error_info="exit code $exit_code"
+    elif echo "$output" | grep -qE '\[\+\].*(Pwn3d!|logged in|Login successful|authenticated)'; then
+      status="PRAWDOPODOBNY SUKCES"
     elif echo "$output" | grep -qE '\[-\]'; then
-      status="ODRZUCONO"
-    else
-      status="NIEZNANY"
+      status="ODRZUCONO / BRAK SUKCESU"
     fi
 
     summary_rows+=("$proto|$u:$p_masked|$status|${elapsed}s|$error_info")
 
     if (( attempt_count < run_attempts )); then
-      delay=$(awk -v min="$delay_min" -v max="$delay_max" 'BEGIN{srand(); printf "%.2f", min+rand()*(max-min)}')
-      log "⏳ Czekam ${delay}s przed kolejną próbą..."
+      # Bash RANDOM dostarcza nowe ziarno dla każdego opóźnienia.
+      delay=$(awk -v r="$RANDOM" -v min="$delay_min" -v max="$delay_max" \
+        'BEGIN {srand(r); printf "%.2f", min + rand() * (max - min)}')
+      log "Czekam ${delay}s przed kolejnym wywołaniem..."
       sleep "$delay"
       log ""
     fi
   done
+  (( stop_all == 1 )) && break
 done
 
 if (( planned_attempts > run_attempts )); then
-  log "ℹ️  Zatrzymano po $run_attempts próbach (twardy limit --max-attempts)."
-  log "   Pozostało niewykonanych kombinacji: $(( planned_attempts - run_attempts ))"
+  log "Zatrzymano po $run_attempts wywołaniach nxc; pominięto $((planned_attempts-run_attempts)) kombinacji."
   log ""
 fi
 
 log "=================================================================="
-log " PODSUMOWANIE"
+log "PODSUMOWANIE"
 log "=================================================================="
-log "$(printf "%-8s %-25s %-16s %-8s %-s" "PROTO" "CREDS" "STATUS" "CZAS" "INFO")"
-log "$(printf "%-8s %-25s %-16s %-8s %-s" "-----" "-----" "------" "----" "----")"
+log "$(printf '%-8s %-25s %-24s %-8s %-s' "PROTO" "CREDS" "STATUS" "CZAS" "INFO")"
+log "$(printf '%-8s %-25s %-24s %-8s %-s' "-----" "-----" "------" "----" "----")"
 
 success_count=0
 for row in "${summary_rows[@]}"; do
   IFS='|' read -r proto creds_s status elapsed info <<< "$row"
-  log "$(printf "%-8s %-25s %-16s %-8s %-s" "$proto" "$creds_s" "$status" "$elapsed" "$info")"
-  [[ "$status" == "SUKCES" ]] && success_count=$((success_count + 1))
+  log "$(printf '%-8s %-25s %-24s %-8s %-s' "$proto" "$creds_s" "$status" "$elapsed" "$info")"
+  [[ "$status" == "PRAWDOPODOBNY SUKCES" ]] && success_count=$((success_count + 1))
 done
 
 log ""
-log ">>> Udane logowania: $success_count / ${#summary_rows[@]}"
-if (( success_count > 0 )); then
-  log ">>> Sukcesy (hasła zamaskowane w logu - sprawdź pełny output nxc powyżej przy potrzebie):"
-  for row in "${summary_rows[@]}"; do
-    IFS='|' read -r proto creds_s status elapsed info <<< "$row"
-    [[ "$status" == "SUKCES" ]] && log "    - $proto -> $creds_s"
-  done
-fi
+log ">>> Prawdopodobne sukcesy: $success_count / ${#summary_rows[@]}"
+log ">>> Statusy są heurystyczne; sprawdź pełny wynik modułu, jeśli wynik jest niejednoznaczny."
