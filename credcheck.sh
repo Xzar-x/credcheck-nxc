@@ -234,12 +234,14 @@ for proto in "${protocols[@]}"; do
       status="BŁĄD NXC"
       error_info="exit code $exit_code"
     elif echo "$output" | grep -qiE '\[\+\].*(Pwn3d!|logged in|login successful|authenticated|anonymous login)'; then
-      status="PRAWDOPODOBNY SUKCES"
+      status="SUKCES - WZORZEC POTWIERDZONY"
     elif echo "$output" | grep -qE '\[\+\]'; then
-      # [+] bez rozpoznanego słowa kluczowego - prawdopodobny sukces (konwencja
-      # nxc: [+] = udana autoryzacja), ale wymaga ręcznego potwierdzenia, bo nie
-      # pasuje do znanych wzorców.
-      status="SUKCES (NIEPOTWIERDZONY WZORZEC)"
+      # [+] bez rozpoznanego słowa kluczowego. UWAGA: znaczenie "[+]" różni się
+      # między modułami NetExec (dla części protokołów to zawsze udana autoryzacja,
+      # dla innych może oznaczać coś innego, np. samo powodzenie konkretnej
+      # operacji modułu). Nie traktuj tego jako potwierdzonego dostępu - zweryfikuj
+      # ręcznie dedykowanym klientem danego protokołu.
+      status="MOŻLIWY SUKCES - WYMAGA WERYFIKACJI"
     elif echo "$output" | grep -qE '\[-\]'; then
       status="ODRZUCONO / BRAK SUKCESU"
     fi
@@ -268,13 +270,18 @@ log "=================================================================="
 log "$(printf '%-8s %-25s %-24s %-8s %-s' "PROTO" "CREDS" "STATUS" "CZAS" "INFO")"
 log "$(printf '%-8s %-25s %-24s %-8s %-s' "-----" "-----" "------" "----" "----")"
 
-success_count=0
+confirmed_count=0
+unconfirmed_count=0
 for row in "${summary_rows[@]}"; do
   IFS='|' read -r proto creds_s status elapsed info <<< "$row"
   log "$(printf '%-8s %-25s %-24s %-8s %-s' "$proto" "$creds_s" "$status" "$elapsed" "$info")"
-  [[ "$status" == "PRAWDOPODOBNY SUKCES" || "$status" == "SUKCES (NIEPOTWIERDZONY WZORZEC)" ]] && success_count=$((success_count + 1))
+  [[ "$status" == "SUKCES - WZORZEC POTWIERDZONY" ]] && confirmed_count=$((confirmed_count + 1))
+  [[ "$status" == "MOŻLIWY SUKCES - WYMAGA WERYFIKACJI" ]] && unconfirmed_count=$((unconfirmed_count + 1))
 done
 
 log ""
-log ">>> Prawdopodobne sukcesy: $success_count / ${#summary_rows[@]}"
-log ">>> Statusy są heurystyczne; sprawdź pełny wynik modułu, jeśli wynik jest niejednoznaczny."
+log ">>> Sukcesy z potwierdzonym wzorcem: $confirmed_count / ${#summary_rows[@]}"
+log ">>> Możliwe sukcesy wymagające ręcznej weryfikacji: $unconfirmed_count / ${#summary_rows[@]}"
+log ">>> UWAGA: znaczenie \"[+]\" w NetExec nie jest identyczne dla wszystkich protokołów."
+log ">>>        Każdy wynik - zwłaszcza bez potwierdzonego wzorca - zweryfikuj ręcznie"
+log ">>>        dedykowanym klientem danego protokołu (smbclient, ftp, ssh, itd.)."
