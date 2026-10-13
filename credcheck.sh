@@ -45,6 +45,7 @@ dla protokołów, dla których znaleziono przypisany port OPEN.
 -h, --help          pomoc
 HELP
 }
+
 need_value() { if (($# < 2)); then echo "Błąd: $1 wymaga wartości." >&2; exit 1; fi; }
 while (($#)); do
   case "$1" in
@@ -100,14 +101,13 @@ command -v nxc >/dev/null 2>&1 || { echo "Błąd: brak nxc w PATH." >&2; exit 1;
 if [[ -n "$output_file" ]]; then
   : > "$output_file" 2>/dev/null || { echo "Błąd: nie można zapisać logu: $output_file" >&2; exit 1; }
 fi
-# log: drukuje na ekran (z kolorami ANSI), do pliku bez kolorów
+
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' <<< "$1"; }
 log() {
   printf '%b\n' "$1"
   [[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$1")" >> "$output_file"
 }
 clog() {
-  # clog <kolor> <tekst> — kolorowa linia
   printf '%b\n' "${1}${2}${C_RESET}"
   [[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$2")" >> "$output_file"
 }
@@ -173,7 +173,7 @@ fi
 mask_pass() { local p="$1"; if [[ -z "$p" ]]; then printf '(puste)'; else printf '%*s' "${#p}" '' | tr ' ' '*'; fi; }
 literal_replace() {
   local text="$1" needle="$2" replacement="$3" before rest
-  [[ -z "$needle" ]] && { printf '%s' "$text"; return; }
+  [[ -n "$needle" ]] && { printf '%s' "$text"; return; }
   while [[ "$text" == *"$needle"* ]]; do
     before="${text%%"$needle"*}"; printf '%s%s' "$before" "$replacement"
     rest="${text#*"$needle"}"; text="$rest"
@@ -184,7 +184,13 @@ literal_replace() {
 log "${C_CYAN}Tryb:${C_RESET} $mode"; log "${C_CYAN}Cel:${C_RESET} $target"; log "${C_CYAN}Otwarte porty:${C_RESET} $open_ports"; log "${C_CYAN}Protokoły po filtracji:${C_RESET} ${protocols[*]}"
 log "${C_CYAN}Wywołania nxc:${C_RESET} $run_count z $planned"; log "${C_CYAN}Opóźnienie:${C_RESET} ${delay_min}-${delay_max}s"
 [[ -n "$output_file" ]] && log "${C_CYAN}Log:${C_RESET} $output_file (hasła maskowane)"
+
 declare -a rows=()
+declare -a raw_protos=()
+declare -a raw_users=()
+declare -a raw_passes=()
+declare -a raw_statuses=()
+
 attempt=0
 for proto in "${protocols[@]}"; do
   for idx in "${!users[@]}"; do
@@ -205,6 +211,12 @@ for proto in "${protocols[@]}"; do
     elif grep -qE '\[-\]' <<< "$output"; then status="ODRZUCONO / BRAK SUKCESU"
     fi
     rows+=("$proto|$u:$pm|$status|$((end-start))s|$info")
+    
+    raw_protos+=("$proto")
+    raw_users+=("$u")
+    raw_passes+=("$p")
+    raw_statuses+=("$status")
+
     if ((attempt < run_count)); then
       delay=$(awk -v r="$RANDOM" -v min="$delay_min" -v max="$delay_max" 'BEGIN{srand(r); printf "%.2f", min+rand()*(max-min)}')
       log "Czekam ${delay}s..."; sleep "$delay"
@@ -249,3 +261,131 @@ else
   log "${C_DIM}  Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / ${#rows[@]}${C_RESET}"
 fi
 log "${C_CYAN}Uwaga:${C_RESET} znaczenie \"[+]\" różni się między protokołami; weryfikuj wyniki ręcznie."
+
+declare -a valid_indices=()
+for i in "${!raw_statuses[@]}"; do
+  st="${raw_statuses[$i]}"
+  if [[ "$st" == "SUKCES - WZORZEC POTWIERDZONY" ]] || [[ "$st" == "MOŻLIWY SUKCES - WYMAGA WERYFIKACJI" ]]; then
+    valid_indices+=("$i")
+  fi
+done
+
+if ((${#valid_indices[@]} > 0)); then
+  echo ""
+  clog "$C_GREEN" ">>> Wykryto pasujące poświadczenia lub potencjalne sukcesy!"
+  read -r -p "Czy chcesz uruchomić zewnętrzne narzędzie i zalogować się do któregoś z serwisów? [t/N]: " launch_choice
+  if [[ "$launch_choice" =~ ^[TtYy]$ ]]; then
+    echo ""
+    clog "$C_CYAN" "Wybierz pozycję do połączenia:"
+    
+    for opt_num in "${!valid_indices[@]}"; do
+      idx="${valid_indices[$opt_num]}"
+      p_proto="${raw_protos[$idx]}"
+      p_user="${raw_users[$idx]}"
+      p_pass="${raw_passes[$idx]}"
+      p_stat="${raw_statuses[$idx]}"
+      display_u="${p_user:-<pusty>}"
+      display_p="${p_pass:-<puste>}"
+      printf "  [%d] Protokół: %s | Użytkownik: %s | Hasło: %s (%s)\n" "$((opt_num+1))" "$p_proto" "$display_u" "$display_p" "$p_stat"
+    done
+    
+    read -r -p "Wpisz numer opcji (lub wciśnij Enter, aby anulować): " choice_idx
+    if [[ "$choice_idx" =~ ^[0-9]+$ ]] && (( choice_idx >= 1 && choice_idx <= ${#valid_indices[@]} )); then
+      selected_array_idx="${valid_indices[$((choice_idx-1))]}"
+      s_proto="${raw_protos[$selected_array_idx]}"
+      s_user="${raw_users[$selected_array_idx]}"
+      s_pass="${raw_passes[$selected_array_idx]}"
+      
+      echo ""
+      clog "$C_CYAN" ">>> Wybrano: protokół $s_proto dla celu $target (użytkownik: ${s_user:-<pusty>})"
+      
+      case "$s_proto" in
+        rdp)
+          if command -v xfreerdp >/dev/null 2>&1; then
+            clog "$C_GREEN" "Uruchamiam xfreerdp..."
+            if [[ -n "$s_pass" ]]; then
+              xfreerdp /v:"$target" /u:"$s_user" /p:"$s_pass" /dynamic-resolution +clipboard
+            else
+              xfreerdp /v:"$target" /u:"$s_user" /dynamic-resolution +clipboard
+            fi
+          else
+            clog "$C_RED" "Błąd: Narzędzie 'xfreerdp' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj je poleceniem:"
+            echo "  sudo apt update && sudo apt install -y xfreerdp"
+          fi
+          ;;
+        ssh)
+          if command -v ssh >/dev/null 2>&1; then
+            clog "$C_GREEN" "Uruchamiam ssh..."
+            if [[ -n "$s_user" ]]; then
+              ssh "${s_user}@${target}"
+            else
+              ssh "$target"
+            fi
+          else
+            clog "$C_RED" "Błąd: Narzędzie 'ssh' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt install openssh-client"
+          fi
+          ;;
+        smb)
+          if command -v smbclient >/dev/null 2>&1; then
+            clog "$C_GREEN" "Uruchamiam smbclient..."
+            smbclient -L "\\\\$target" -U "${s_user}%${s_pass}"
+          else
+            clog "$C_RED" "Błąd: Narzędzie 'smbclient' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj je poleceniem:"
+            echo "  sudo apt update && sudo apt install -y smbclient"
+          fi
+          ;;
+        ftp)
+          if command -v ftp >/dev/null 2>&1; then
+            clog "$C_GREEN" "Uruchamiam ftp..."
+            ftp "$target"
+          else
+            clog "$C_RED" "Błąd: Narzędzie 'ftp' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt install inetutils-ftp"
+          fi
+          ;;
+        vnc)
+          if command -v vncviewer >/dev/null 2>&1; then
+            clog "$C_GREEN" "Uruchamiam vncviewer..."
+            vncviewer "$target"
+          else
+            clog "$C_RED" "Błąd: Narzędzie 'vncviewer' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt install tigervnc-viewer"
+          fi
+          ;;
+        winrm)
+          if command -v evil-winrm >/dev/null 2>&1; then
+            clog "$C_GREEN" "Uruchamiam evil-winrm..."
+            if [[ -n "$s_pass" ]]; then
+              evil-winrm -i "$target" -u "$s_user" -p "$s_pass"
+            else
+              evil-winrm -i "$target" -u "$s_user"
+            fi
+          else
+            clog "$C_RED" "Błąd: Narzędzie 'evil-winrm' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj je poleceniem:"
+            echo "  gem install evil-winrm"
+          fi
+          ;;
+        mssql)
+          if command -v impacket-mssqlclient >/dev/null 2>&1; then
+            clog "$C_GREEN" "Uruchamiam impacket-mssqlclient..."
+            impacket-mssqlclient "${s_user}:${s_pass}@${target}"
+          else
+            clog "$C_RED" "Błąd: Narzędzie 'impacket-mssqlclient' nie zostało znalezione w PATH."
+            clog "$C_YELLOW" "Zainstaluj pakiety Impacket:"
+            echo "  pip install impacket"
+          fi
+          ;;
+        *)
+          clog "$C_YELLOW" "Brak predefiniowanego klienta interaktywnego dla protokołu: $s_proto"
+          clog "$C_CYAN" "Możesz użyć nxc: nxc $s_proto $target -u \"$s_user\" -p \"$s_pass\""
+          ;;
+      esac
+    else
+      echo "Anulowano lub wybrano niepoprawny numer."
+    fi
+  fi
+fi
