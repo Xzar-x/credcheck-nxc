@@ -1,0 +1,19 @@
+# Logi i wyniki skanów - NIGDY nie trafiają do repo (mogą zawierać dane
+# uwierzytelniające, nawet przy włączonym maskowaniu - --no-mask je wyłącza,
+# a pojedyncza pomyłka wystarczy, żeby trafiły tu w pełni jawne).
+*.log
+logs/
+results*
+wyniki*
+output*
+scan_*
+*.out
+
+# Pliki tymczasowe skryptu
+*.tmp
+.cache/
+
+# Typowe śmieci edytorów/systemu
+.DS_Store
+*.swp
+*~
