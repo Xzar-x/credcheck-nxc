@@ -79,11 +79,11 @@ while (($#)); do
   esac
 done
 [[ -n "$target" ]] || { echo "Błąd: wymagane -t/--target." >&2; exit 1; }
-[[ "\( max_attempts" =\~ ^[0-9]+ \) ]] && ((10#$max_attempts >= 1)) || { echo "Błąd: --max-attempts musi być >= 1." >&2; exit 1; }
+[[ "$max_attempts" =~ ^[0-9]+ ]] && ((10#$max_attempts >= 1)) || { echo "Błąd: --max-attempts musi być >= 1." >&2; exit 1; }
 max_attempts=$((10#$max_attempts))
-[[ "\( nxc_timeout" =\~ ^[0-9]+ \) ]] && ((10#$nxc_timeout >= 5)) || { echo "Błąd: --timeout musi być liczbą >= 5." >&2; exit 1; }
+[[ "$nxc_timeout" =~ ^[0-9]+ ]] && ((10#$nxc_timeout >= 5)) || { echo "Błąd: --timeout musi być liczbą >= 5." >&2; exit 1; }
 nxc_timeout=$((10#$nxc_timeout))
-valid_num() { [[ "$1" =\~ ^[0-9]+([.][0-9]+)?$ ]]; }
+valid_num() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 valid_num "$delay_min" && valid_num "$delay_max" || { echo "Błąd: opóźnienia muszą być liczbami nieujemnymi." >&2; exit 1; }
 awk -v a="$delay_min" -v b="$delay_max" 'BEGIN{exit !(a<=b)}' || { echo "Błąd: delay-min > delay-max." >&2; exit 1; }
 ((user_set == pass_set)) || { echo "Błąd: podaj jednocześnie -u i -p albo pomiń oba." >&2; exit 1; }
@@ -91,8 +91,8 @@ awk -v a="$delay_min" -v b="$delay_max" 'BEGIN{exit !(a<=b)}' || { echo "Błąd:
 if [[ -n "$protocols_arg" ]]; then
   IFS=',' read -r -a protocols <<< "$protocols_arg"
   for i in "${!protocols[@]}"; do
-    protocols[\( i]=" \){protocols[$i]//[[:space:]]/}"
-    protocols[\( i]=" \){protocols[$i],,}"
+    protocols[$i]="${protocols[$i]//[[:space:]]/}"
+    protocols[$i]="${protocols[$i],,}"
     [[ -n "${protocols[$i]}" ]] || { echo "Błąd: pusta nazwa protokołu." >&2; exit 1; }
   done
 else
@@ -111,7 +111,7 @@ for proto in "${protocols[@]}"; do
   IFS=',' read -r -a pp <<< "${proto_ports[$proto]}"
   for port in "${pp[@]}"; do port_set["$port"]=1; done
 done
-port_list="\( (printf '%s\n' " \){!port_set[@]}" | sort -n | paste -sd, -)"
+port_list="$(printf '%s\n' "${!port_set[@]}" | sort -n | paste -sd, -)"
 
 command -v nmap >/dev/null 2>&1 || { echo "Błąd: brak nmap w PATH." >&2; exit 1; }
 command -v nxc >/dev/null 2>&1 || { echo "Błąd: brak nxc w PATH." >&2; exit 1; }
@@ -122,11 +122,11 @@ fi
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' <<< "$1"; }
 log() {
   printf '%b\n' "$1"
-  [[ -n "\( output_file" ]] && printf '%s\n' " \)(strip_ansi "$1")" >> "$output_file"
+  [[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$1")" >> "$output_file"
 }
 clog() {
-  printf '%b\n' "\( {1} \){2}${C_RESET}"
-  [[ -n "\( output_file" ]] && printf '%s\n' " \)(strip_ansi "$2")" >> "$output_file"
+  printf '%b\n' "${1}${2}${C_RESET}"
+  [[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$2")" >> "$output_file"
 }
 
 clog "$C_CYAN" ">>> Nmap sprawdza w tle porty TCP: $port_list"
@@ -135,8 +135,8 @@ scan_tmp="$(mktemp)" || exit 1
 trap 'rm -f "$scan_tmp"' EXIT
 nmap -n -Pn -sT --open -p "$port_list" -oG - "$target" >"$scan_tmp" 2>&1 &
 nmap_pid=$!
-wait "\( nmap_pid"; nmap_rc= \)?
-if ((nmap_rc != 0)); then printf '%b\n' "${C_RED}Błąd Nmap (kod \( nmap_rc): \){C_RESET}" >&2; cat "$scan_tmp" >&2; exit 1; fi
+wait "$nmap_pid"; nmap_rc=$?
+if ((nmap_rc != 0)); then printf '%b\n' "${C_RED}Błąd Nmap (kod $nmap_rc): ${C_RESET}" >&2; cat "$scan_tmp" >&2; exit 1; fi
 
 open_ports=""
 while IFS= read -r line; do
@@ -144,9 +144,9 @@ while IFS= read -r line; do
   field="${line#*Ports: }"
   IFS=',' read -r -a entries <<< "$field"
   for entry in "${entries[@]}"; do
-    if [[ "$entry" =\~ ^[[:space:]]*([0-9]+)/open/tcp/ ]]; then
+    if [[ "$entry" =~ ^[[:space:]]*([0-9]+)/open/tcp/ ]]; then
       port="${BASH_REMATCH[1]}"
-      [[ ",$open_ports," == *",\( port,"* ]] || open_ports+=" \){open_ports:+,}$port"
+      [[ ",$open_ports," == *",$port,"* ]] || open_ports+="${open_ports:+,}$port"
     fi
   done
 done < "$scan_tmp"
@@ -163,10 +163,10 @@ for proto in "${protocols[@]}"; do
   IFS=',' read -r -a pp <<< "${proto_ports[$proto]}"
   for port in "${pp[@]}"; do
     if [[ "$port" == *-* ]]; then
-      lo="\( {port%-*}"; hi=" \){port#*-}"
-      for ((n=lo; n<=hi; n++)); do [[ ",$open_ports," == *",$n,"* ]] && found=1; done
+      lo="${port%-*}"; hi="${port#*-}"
+      for ((n=lo; n<=hi; n++)); do [[ ",$open_ports," == *,$n,"* ]] && found=1; done
     else
-      [[ ",$open_ports," == *",$port,"* ]] && found=1
+      [[ ",$open_ports," == *,$port,"* ]] && found=1
     fi
   done
   if ((found)); then active_protocols+=("$proto"); else clog "$C_DIM" ">>> Pomijam $proto — przypisane porty nie są OPEN."; fi
@@ -222,12 +222,12 @@ if ((planned > max_attempts)); then
   echo "Plan po filtracji: $planned wywołań nxc; limit: $max_attempts."
   if ((auto_yes == 0)); then
     read -r -p "Kontynuować z limitem? [t/N]: " confirm
-    [[ "\( confirm" =\~ ^[TtYy] \) ]] || { echo "Przerwano."; exit 1; }
+    [[ "$confirm" =~ ^[TtYy] ]] || { echo "Przerwano."; exit 1; }
   fi
   run_count=$max_attempts
 fi
 
-mask_pass() { local p="$1"; if [[ -z "\( p" ]]; then printf '(puste)'; else printf '%*s' " \){#p}" '' | tr ' ' '*'; fi; }
+mask_pass() { local p="$1"; if [[ -z "$p" ]]; then printf '(puste)'; else printf '%*s' "${#p}" '' | tr ' ' '*'; fi; }
 
 # Sortuje tablicę (przez nameref) malejąco wg długości stringów - czysty bash,
 # bez pipe'owania przez zewnętrzne narzędzia (bezpieczne nawet dla sekretów
@@ -256,13 +256,13 @@ literal_replace() {
   printf '%s' "$text"
 }
 
-log "\( {C_CYAN}Tryb: \){C_RESET} \( mode"; log " \){C_CYAN}Cel:${C_RESET} \( target"; log " \){C_CYAN}Otwarte porty:${C_RESET} \( open_ports"; log " \){C_CYAN}Protokoły po filtracji:${C_RESET} ${protocols[*]}"
-log "\( {C_CYAN}Wywołania nxc: \){C_RESET} $run_count z \( planned"; log " \){C_CYAN}Opóźnienie:${C_RESET} \( {delay_min}- \){delay_max}s"; log "\( {C_CYAN}Timeout nxc: \){C_RESET} ${nxc_timeout}s"
+log "${C_CYAN}Tryb: ${C_RESET}$mode"; log "${C_CYAN}Cel:${C_RESET}$target"; log "${C_CYAN}Otwarte porty:${C_RESET}$open_ports"; log "${C_CYAN}Protokoły po filtracji:${C_RESET} ${protocols[*]}"
+log "${C_CYAN}Wywołania nxc: ${C_RESET}$run_count z $planned"; log "${C_CYAN}Opóźnienie:${C_RESET}${delay_min}-${delay_max}s"; log "${C_CYAN}Timeout nxc: ${C_RESET}${nxc_timeout}s"
 if [[ -n "$output_file" ]]; then
   if ((no_mask)); then
-    log "\( {C_CYAN}Log: \){C_RESET} $output_file \( {C_YELLOW}(hasła JAWNE - użyj --mask, jeśli ten plik może trafić gdzieś dalej) \){C_RESET}"
+    log "${C_CYAN}Log: ${C_RESET}$output_file ${C_YELLOW}(hasła JAWNE - użyj --mask, jeśli ten plik może trafić gdzieś dalej) ${C_RESET}"
   else
-    log "\( {C_CYAN}Log: \){C_RESET} $output_file (hasła maskowane)"
+    log "${C_CYAN}Log: ${C_RESET}$output_file (hasła maskowane)"
   fi
 fi
 
@@ -277,28 +277,28 @@ for proto in "${protocols[@]}"; do
   get_creds_for_proto "$proto"
   for idx in "${!proto_users[@]}"; do
     ((attempt < run_count)) || break
-    u="${proto_users[\( idx]}"; p=" \){proto_passwords[$idx]}"
-    if ((no_mask)); then pm="\( {p:-(puste)}"; else pm=" \)(mask_pass "$p")"; fi
+    u="${proto_users[$idx]}"; p="${proto_passwords[$idx]}"
+    if ((no_mask)); then pm="${p:-(puste)}"; else pm="$(mask_pass "$p")"; fi
     ((attempt+=1))
     probe_note=""
-    ((user_set == 0)) && [[ -n "${blind_minimal[$proto]:-}" ]] && probe_note=" \( {C_DIM}(sonda dostępności, nie zgadywanie credsów) \){C_RESET}"
-    log "\( {C_BOLD} \){C_WHITE}######### [$attempt/$run_count] $proto -- $u:\( pm ######### \){probe_note}${C_RESET}"
+    ((user_set == 0)) && [[ -n "${blind_minimal[$proto]:-}" ]] && probe_note=" ${C_DIM}(sonda dostępności, nie zgadywanie credsów)${C_RESET}"
+    log "${C_BOLD}${C_WHITE}######### [$attempt/$run_count] $proto -- $u:$pm #########${probe_note}${C_RESET}"
     start=$(date +%s)
     # timeout chroni przed wiszącymi połączeniami (szczególnie HTB VPN / wolna sieć)
-    output=\( (timeout " \){nxc_timeout}s" nxc "$proto" "$target" -u "$u" -p "$p" 2>&1)
+    output=$(timeout "${nxc_timeout}s" nxc "$proto" "$target" -u "$u" -p "$p" 2>&1)
     rc=$?
     end=$(date +%s)
     masked="$output"
     if ((no_mask == 0)); then
       mask_targets=()
-      for secret in "\( p" " \){proto_passwords[@]}"; do
+      for secret in "$p" "${proto_passwords[@]}"; do
         [[ -z "$secret" ]] && continue
         already=0
         for seen in "${mask_targets[@]:-}"; do [[ "$seen" == "$secret" ]] && { already=1; break; }; done
         ((already)) || mask_targets+=("$secret")
       done
       sort_by_length_desc mask_targets
-      for secret in "\( {mask_targets[@]}"; do masked=" \)(literal_replace "$masked" "\( secret" " \)(mask_pass "$secret")")"; done
+      for secret in "${mask_targets[@]}"; do masked="$(literal_replace "$masked" "$secret" "$(mask_pass "$secret")")"; done
     fi
     log "$masked"; log ""
     status="NIEZNANY"; info=""
@@ -311,7 +311,7 @@ for proto in "${protocols[@]}"; do
     elif grep -qE '\[\+\]' <<< "$output"; then status="MOŻLIWY SUKCES - WYMAGA WERYFIKACJI"
     elif grep -qE '\[-\]' <<< "$output"; then status="ODRZUCONO / BRAK SUKCESU"
     fi
-    rows+=("$proto|$u:$pm|\( status| \)((end-start))s|$info")
+    rows+=("$proto|$u:$pm|$status|$((end-start))s|$info")
 
     raw_protos+=("$proto")
     raw_users+=("$u")
@@ -326,42 +326,42 @@ for proto in "${protocols[@]}"; do
   ((attempt >= run_count)) && break
 done
 if ((planned > run_count)); then log "Zatrzymano po $run_count wywołaniach; pominięto $((planned-run_count)) kombinacji."; fi
-log "\( {C_BOLD} \){C_CYAN}==================================================================${C_RESET}"
-log "\( {C_BOLD} \){C_WHITE}                        PODSUMOWANIE${C_RESET}"
-log "\( {C_BOLD} \){C_CYAN}==================================================================${C_RESET}"
+log "${C_BOLD}${C_CYAN}==================================================================${C_RESET}"
+log "${C_BOLD}${C_WHITE}                        PODSUMOWANIE${C_RESET}"
+log "${C_BOLD}${C_CYAN}==================================================================${C_RESET}"
 header="$(printf '%-8s %-25s %-32s %-8s %-s' PROTO CREDS STATUS CZAS INFO)"
-log "\( {C_BOLD} \){C_WHITE}\( {header} \){C_RESET}"
-log "\( {C_DIM} \)(printf '%0.s─' {1..85})${C_RESET}"
+log "${C_BOLD}${C_WHITE}${header}${C_RESET}"
+log "${C_DIM}$(printf '%0.s─' {1..85})${C_RESET}"
 confirmed=0 uncertain=0
 for row in "${rows[@]}"; do
   IFS='|' read -r proto creds status elapsed info <<< "$row"
   line="$(printf '%-8s %-25s %-32s %-8s %-s' "$proto" "$creds" "$status" "$elapsed" "$info")"
   if [[ "$status" == "SUKCES - WZORZEC POTWIERDZONY" ]]; then
-    log "\( {C_BG_GREEN} \){C_WHITE}\( {C_BOLD} \){line}${C_RESET}"
+    log "${C_BG_GREEN}${C_WHITE}${C_BOLD}${line}${C_RESET}"
     ((confirmed+=1))
   elif [[ "$status" == "MOŻLIWY SUKCES - WYMAGA WERYFIKACJI" ]]; then
-    log "\( {C_BG_YELLOW} \){C_BOLD}\( {line} \){C_RESET}"
+    log "${C_BG_YELLOW}${C_BOLD}${line}${C_RESET}"
     ((uncertain+=1))
   elif [[ "$status" == "ODRZUCONO / BRAK SUKCESU" ]]; then
-    log "\( {C_RED} \){line}${C_RESET}"
+    log "${C_RED}${line}${C_RESET}"
   elif [[ "$status" == "BRAK POŁĄCZENIA" ]] || [[ "$status" == "BŁĄD NXC" ]] || [[ "$status" == "TIMEOUT" ]]; then
-    log "\( {C_DIM} \){line}${C_RESET}"
+    log "${C_DIM}${line}${C_RESET}"
   else
     log "$line"
   fi
 done
-log "\( {C_DIM} \)(printf '%0.s─' {1..85})${C_RESET}"
+log "${C_DIM}$(printf '%0.s─' {1..85})${C_RESET}"
 if ((confirmed > 0)); then
-  log "\( {C_BG_GREEN} \){C_WHITE}${C_BOLD} ✔ Sukcesy z potwierdzonym wzorcem: $confirmed / ${#rows[@]} ${C_RESET}"
+  log "${C_BG_GREEN}${C_WHITE}${C_BOLD} ✔ Sukcesy z potwierdzonym wzorcem: $confirmed / ${#rows[@]} ${C_RESET}"
 else
-  log "${C_DIM}  Sukcesy z potwierdzonym wzorcem: $confirmed / \( {#rows[@]} \){C_RESET}"
+  log "${C_DIM}  Sukcesy z potwierdzonym wzorcem: $confirmed / ${#rows[@]}${C_RESET}"
 fi
 if ((uncertain > 0)); then
-  log "\( {C_BG_YELLOW} \){C_BOLD} ⚠ Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / ${#rows[@]} ${C_RESET}"
+  log "${C_BG_YELLOW}${C_BOLD} ⚠ Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / ${#rows[@]} ${C_RESET}"
 else
-  log "${C_DIM}  Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / \( {#rows[@]} \){C_RESET}"
+  log "${C_DIM}  Możliwe sukcesy wymagające ręcznej weryfikacji: $uncertain / ${#rows[@]}${C_RESET}"
 fi
-log "\( {C_CYAN}Uwaga: \){C_RESET} znaczenie \"[+]\" różni się między protokołami; weryfikuj wyniki ręcznie."
+log "${C_CYAN}Uwaga: ${C_RESET} znaczenie \"[+]\" różni się między protokołami; weryfikuj wyniki ręcznie."
 
 declare -a valid_indices=()
 for i in "${!raw_statuses[@]}"; do
@@ -375,7 +375,7 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
   echo ""
   clog "$C_GREEN" ">>> Wykryto pasujące poświadczenia lub potencjalne sukcesy!"
   read -r -p "Czy chcesz uruchomić zewnętrzne narzędzie i zalogować się do któregoś z serwisów? [t/N]: " launch_choice
-  if [[ "\( launch_choice" =\~ ^[TtYy] \) ]]; then
+  if [[ "$launch_choice" =~ ^[TtYy] ]]; then
     echo ""
     clog "$C_CYAN" "Wybierz pozycję do połączenia:"
 
@@ -391,8 +391,8 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
     done
 
     read -r -p "Wpisz numer opcji (lub wciśnij Enter, aby anulować): " choice_idx
-    if [[ "\( choice_idx" =\~ ^[0-9]+ \) ]] && (( choice_idx >= 1 && choice_idx <= ${#valid_indices[@]} )); then
-      selected_array_idx="\( {valid_indices[ \)((choice_idx-1))]}"
+    if [[ "$choice_idx" =~ ^[0-9]+ ]] && (( choice_idx >= 1 && choice_idx <= ${#valid_indices[@]} )); then
+      selected_array_idx="${valid_indices[$((choice_idx-1))]}"
       s_proto="${raw_protos[$selected_array_idx]}"
       s_user="${raw_users[$selected_array_idx]}"
       s_pass="${raw_passes[$selected_array_idx]}"
@@ -421,7 +421,7 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
           if [[ -n "$s_pass" ]] && command -v sshpass >/dev/null 2>&1; then
             clog "$C_GREEN" "Uruchamiam ssh + sshpass (hasło podawane automatycznie)..."
             if [[ -n "$s_user" ]]; then
-              sshpass -p "\( s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no " \){s_user}@${target}"
+              sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "${s_user}@${target}"
             else
               sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "$target"
             fi
@@ -433,7 +433,7 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
             fi
             clog "$C_GREEN" "Uruchamiam ssh (wpisz hasło ręcznie)..."
             if [[ -n "$s_user" ]]; then
-              ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "\( {s_user}@ \){target}"
+              ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "${s_user}@${target}"
             else
               ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "$target"
             fi
@@ -453,7 +453,7 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
               smbclient -L "//$target" -U "$s_user" --password="$s_pass"
             else
               # Fallback dla starszych wersji
-              smbclient -L "//\( target" -U " \){s_user}%${s_pass}"
+              smbclient -L "//$target" -U "$s_user%$s_pass"
             fi
           else
             clog "$C_RED" "Błąd: Narzędzie 'smbclient' nie zostało znalezione w PATH."
@@ -518,9 +518,9 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
             # Gdy wykryjemy ':', ostrzegamy i próbujemy i tak (użytkownik może poprawić ręcznie).
             if [[ "$s_pass" == *":"* ]]; then
               clog "$C_YELLOW" "Uwaga: hasło zawiera ':' - format user:pass@host może się popsuć."
-              clog "\( C_YELLOW" "Rozważ ręczne: impacket-mssqlclient ' \){s_user}'@${target}  (i podaj hasło)"
+              clog "$C_YELLOW" "Rozważ ręczne: impacket-mssqlclient '$s_user'@$target  (i podaj hasło)"
             fi
-            impacket-mssqlclient "\( {s_user}: \){s_pass}@${target}"
+            impacket-mssqlclient "${s_user}:${s_pass}@${target}"
           else
             clog "$C_RED" "Błąd: Narzędzie 'impacket-mssqlclient' nie zostało znalezione w PATH."
             clog "$C_YELLOW" "Zainstaluj pakiety Impacket:"
