@@ -605,18 +605,20 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
 					clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt update && sudo apt install -y lftp"
 				else
 					clog "$C_GREEN" "Uruchamiam lftp (auto‑login, sesja interaktywna)..."
-					# Krótsze timeouty i pominięcie prób TLS = szybszy start dla zwykłego FTP.
-					# ftp:passive-mode no = tryb aktywny (PORT). W sieci HTB VPN Twój
-					# adres jest osiągalny dla maszyny docelowej, więc tryb aktywny
-					# zwykle naprawia problem serwerów zgłaszających zły wewnętrzny
-					# adres w trybie pasywnym (objaw: "mielenie"/reconnect przy ls,get).
-					# Używamy zmiennej środowiskowej LFTP_PASSWORD gdy hasło zawiera przecinek.
-					lftp_tune="set net:timeout 5; set net:max-retries 1; set net:reconnect-interval-base 1; set ftp:ssl-allow no; set ftp:passive-mode no;"
+					# Konfiguracja lftp:
+					# - net:timeout 20: serwery FTP (np. ProFTPD) wykonują reverse DNS na IP klienta
+					#   VPN (10.10.x.x), co w labach HTB powoduje opóźnienie ~10s przed wysłaniem bannera 220.
+					#   Wcześniejszy timeout 5s powodował natychmiastowy błąd "max-retries exceeded".
+					# - net:max-retries 2: zapobiega ucinaniu sesji przy chwilowym lagu.
+					# - ftp:fix-pasv-address yes: koryguje błędne prywatne IP zwracane przez serwer w PASV.
+					# - ftp:auto-passive-mode yes: domyślnie używa PASV, z fallbackiem do trybu aktywnego (PORT).
+					# - ftp:ssl-allow no: pomija niepotrzebne próby negocjacji TLS dla czystego FTP.
+					lftp_tune="set net:timeout 20; set net:max-retries 2; set net:reconnect-interval-base 2; set ftp:ssl-allow no; set ftp:fix-pasv-address yes; set ftp:auto-passive-mode yes;"
 					if [[ -n "$s_user" ]]; then
 						if [[ "$s_pass" == *","* ]]; then
-							export LFTP_PASSWORD="$s_pass"
-							lftp -u "$s_user" -e "$lftp_tune" "$target"
-							unset LFTP_PASSWORD
+							# Gdy hasło zawiera przecinek, przełącznik -u user,pass traktuje to błędnie.
+							# Komenda lftp 'user' przyjmuje osobne argumenty i poprawnie obsługuje przecinki.
+							lftp -e "${lftp_tune} user \"${s_user//\"/\\\"}\" \"${s_pass//\"/\\\"}\";" "$target"
 						else
 							lftp -u "$s_user","$s_pass" -e "$lftp_tune" "$target"
 						fi
