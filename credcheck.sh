@@ -20,7 +20,7 @@ if [[ -t 1 ]]; then
 	C_CYAN='\033[1;36m'
 	C_WHITE='\033[1;37m'
 	C_BG_GREEN='\033[48;5;22m'
-	C_BG_YELLOW='\033[43m'
+	C_BG_YELLOW='\033[48;5;94m'
 	C_DIM='\033[2m'
 else
 	C_RESET='' C_BOLD='' C_RED='' C_GREEN='' C_YELLOW=''
