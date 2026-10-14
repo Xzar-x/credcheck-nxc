@@ -575,7 +575,7 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 					# Usunięto /dynamic-resolution oraz +clipboard – w maszynach wirtualnych (np. HTB)
 					# dynamiczne skalowanie kanału DVC (disp) powoduje błąd sterownika graficznego
 					# w Windows i natychmiastowe wylogowanie sesji użytkownika ("Signing out").
-					local rdp_args=(/v:"$target" /cert:ignore /f)
+					rdp_args=(/v:"$target" /cert:ignore /f)
 					if [[ "$s_user" == *"\\"* ]]; then
 						rdp_args+=(/d:"${s_user%%\\*}" /u:"${s_user#*\\}")
 					elif [[ -n "$s_user" ]]; then
@@ -624,7 +624,7 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 			smb)
 				if command -v smbclient >/dev/null 2>&1; then
 					clog "$C_GREEN" "Pobieram listę udziałów (smbclient -L)..."
-					local smb_has_pass_flag=0
+					smb_has_pass_flag=0
 					if smbclient --help 2>&1 | grep -q -- '--password'; then
 						smb_has_pass_flag=1
 						smbclient -L "//$target" -U "$s_user" --password="$s_pass"
