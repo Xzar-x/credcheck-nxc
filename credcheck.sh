@@ -26,7 +26,7 @@ else
 fi
 
 target="" user="" pass="" user_set=0 pass_set=0
-max_attempts=15 delay_min=0 delay_max=0.3 protocols_arg="" output_file="" auto_yes=0
+max_attempts=15 delay_min=0 delay_max=0.3 protocols_arg="" output_file="" auto_yes=0 no_mask=0
 
 help() {
   cat <<'HELP'
@@ -42,6 +42,8 @@ dla protokołów, dla których znaleziono przypisany port OPEN.
 --protocols         protokoły oddzielone przecinkami
 -o, --output        plik logu; poświadczenia maskowane w wyjściu nxc
 -y, --yes           pomiń potwierdzenie przy przekroczeniu limitu
+--no-mask           nie maskuj haseł w logu/terminalu (gdy sam je znasz i nie
+                    udostępniasz logu dalej)
 -h, --help          pomoc
 HELP
 }
@@ -58,6 +60,7 @@ while (($#)); do
     --protocols) need_value "$@"; protocols_arg="$2"; shift 2;;
     -o|--output) need_value "$@"; output_file="$2"; shift 2;;
     -y|--yes) auto_yes=1; shift;;
+    --no-mask) no_mask=1; shift;;
     -h|--help) help; exit 0;;
     *) echo "Nieznana opcja: $1 (użyj --help)." >&2; exit 1;;
   esac
@@ -93,8 +96,7 @@ for proto in "${protocols[@]}"; do
   IFS=',' read -r -a pp <<< "${proto_ports[$proto]}"
   for port in "${pp[@]}"; do port_set["$port"]=1; done
 done
-port_list=""
-for port in "${!port_set[@]}"; do port_list+="${port_list:+,}$port"; done
+port_list="$(printf '%s\n' "${!port_set[@]}" | sort -n | paste -sd, -)"
 
 command -v nmap >/dev/null 2>&1 || { echo "Błąd: brak nmap w PATH." >&2; exit 1; }
 command -v nxc >/dev/null 2>&1 || { echo "Błąd: brak nxc w PATH." >&2; exit 1; }
@@ -157,10 +159,50 @@ done
 ((${#active_protocols[@]})) || { echo ">>> Nic do sprawdzenia."; exit 0; }
 protocols=("${active_protocols[@]}")
 
-declare -a users=() passwords=()
-if ((user_set)); then mode="Test podanych poświadczeń"; users=("$user"); passwords=("$pass")
-else mode="Test anonymous/guest/null"; users=(anonymous anonymous "" guest guest null); passwords=(anonymous "" "" guest "" null); fi
-planned=$(( ${#protocols[@]} * ${#users[@]} )); run_count=$planned
+# Protokoły, dla których anonymous/guest/null nie mają sensu protokołowego
+# (SSH/WinRM/RDP wymagają realnego konta - nie ma w nich pojęcia "anonimowy
+# login"). W trybie blind dostają tylko jedną sondę sprawdzającą dostępność
+# usługi, zamiast pełnej listy 6 prób, które i tak nie mają szans powieść się
+# inaczej niż przez czysty przypadek błędnej konfiguracji.
+declare -A blind_minimal=([ssh]=1 [winrm]=1 [rdp]=1)
+
+# Dodatkowe, powszechnie znane domyślne credsy producenta/instalatora - celowo
+# TYLKO dla mssql (SQL Server auth rzadko ma politykę lockoutu). Świadomie
+# pomijam SMB/WinRM/RDP - tam konta zwykle żyją w Active Directory z
+# polityką lockoutu, a zgadywanie "admin:admin" niesie realne ryzyko
+# zablokowania czyjegoś konta, nie tylko techniczną porażkę próby.
+declare -A extra_defaults=([mssql]="sa:sa sa: sa:Password123 sa:admin")
+
+if ((user_set)); then
+  mode="Test podanych poświadczeń"
+else
+  mode="Test anonymous/guest/null (SSH/WinRM/RDP: tylko sonda dostępności)"
+fi
+
+get_creds_for_proto() {
+  local proto="$1"
+  if ((user_set)); then
+    proto_users=("$user"); proto_passwords=("$pass")
+  elif [[ -n "${blind_minimal[$proto]:-}" ]]; then
+    proto_users=(""); proto_passwords=("")
+  else
+    proto_users=(anonymous anonymous "" guest guest null); proto_passwords=(anonymous "" "" guest "" null)
+    if [[ -n "${extra_defaults[$proto]:-}" ]]; then
+      local pair u2 p2
+      for pair in ${extra_defaults[$proto]}; do
+        IFS=':' read -r u2 p2 <<< "$pair"
+        proto_users+=("$u2"); proto_passwords+=("$p2")
+      done
+    fi
+  fi
+}
+
+planned=0
+for proto in "${protocols[@]}"; do
+  get_creds_for_proto "$proto"
+  planned=$((planned + ${#proto_users[@]}))
+done
+run_count=$planned
 if ((planned > max_attempts)); then
   echo "Plan po filtracji: $planned wywołań nxc; limit: $max_attempts."
   if ((auto_yes == 0)); then
@@ -171,6 +213,24 @@ if ((planned > max_attempts)); then
 fi
 
 mask_pass() { local p="$1"; if [[ -z "$p" ]]; then printf '(puste)'; else printf '%*s' "${#p}" '' | tr ' ' '*'; fi; }
+
+# Sortuje tablicę (przez nameref) malejąco wg długości stringów - czysty bash,
+# bez pipe'owania przez zewnętrzne narzędzia (bezpieczne nawet dla sekretów
+# zawierających spacje/znaki specjalne). Potrzebne, żeby maskowanie krótszego
+# hasła (np. "pass") nie psuło fragmentu dłuższego hasła (np. "password").
+sort_by_length_desc() {
+  local -n arr_ref=$1
+  local i j tmp n=${#arr_ref[@]}
+  for ((i = 1; i < n; i++)); do
+    tmp="${arr_ref[i]}"
+    j=$((i - 1))
+    while ((j >= 0)) && ((${#arr_ref[j]} < ${#tmp})); do
+      arr_ref[j + 1]="${arr_ref[j]}"
+      j=$((j - 1))
+    done
+    arr_ref[j + 1]="$tmp"
+  done
+}
 literal_replace() {
   local text="$1" needle="$2" replacement="$3" before rest
   [[ -z "$needle" ]] && { printf '%s' "$text"; return; }
@@ -193,14 +253,28 @@ declare -a raw_statuses=()
 
 attempt=0
 for proto in "${protocols[@]}"; do
-  for idx in "${!users[@]}"; do
+  get_creds_for_proto "$proto"
+  for idx in "${!proto_users[@]}"; do
     ((attempt < run_count)) || break
-    u="${users[$idx]}"; p="${passwords[$idx]}"; pm="$(mask_pass "$p")"; ((attempt+=1))
-    log "${C_BOLD}${C_WHITE}######### [$attempt/$run_count] $proto -- $u:$pm #########${C_RESET}"
+    u="${proto_users[$idx]}"; p="${proto_passwords[$idx]}"
+    if ((no_mask)); then pm="${p:-(puste)}"; else pm="$(mask_pass "$p")"; fi
+    ((attempt+=1))
+    probe_note=""
+    ((user_set == 0)) && [[ -n "${blind_minimal[$proto]:-}" ]] && probe_note=" ${C_DIM}(sonda dostępności, nie zgadywanie credsów)${C_RESET}"
+    log "${C_BOLD}${C_WHITE}######### [$attempt/$run_count] $proto -- $u:$pm #########${probe_note}${C_RESET}"
     start=$(date +%s); output=$(nxc "$proto" "$target" -u "$u" -p "$p" 2>&1); rc=$?; end=$(date +%s)
     masked="$output"
-    [[ -n "$p" ]] && masked="$(literal_replace "$masked" "$p" "$pm")"
-    for secret in "${passwords[@]}"; do [[ -n "$secret" ]] && masked="$(literal_replace "$masked" "$secret" "$(mask_pass "$secret")")"; done
+    if ((no_mask == 0)); then
+      mask_targets=()
+      for secret in "$p" "${proto_passwords[@]}"; do
+        [[ -z "$secret" ]] && continue
+        already=0
+        for seen in "${mask_targets[@]:-}"; do [[ "$seen" == "$secret" ]] && { already=1; break; }; done
+        ((already)) || mask_targets+=("$secret")
+      done
+      sort_by_length_desc mask_targets
+      for secret in "${mask_targets[@]}"; do masked="$(literal_replace "$masked" "$secret" "$(mask_pass "$secret")")"; done
+    fi
     log "$masked"; log ""
     status="NIEZNANY"; info=""
     if grep -qiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable|could not connect' <<< "$output"; then
@@ -337,25 +411,25 @@ if ((${#valid_indices[@]} > 0)); then
             echo "  sudo apt update && sudo apt install -y smbclient"
           fi
           ;;
-          ftp)
+        ftp)
           if ! command -v lftp >/dev/null 2>&1; then
             clog "$C_RED" "Błąd: Narzędzie 'lftp' nie zostało znalezione w PATH."
             clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt update && sudo apt install -y lftp"
+          else
+            clog "$C_GREEN" "Uruchamiam lftp (auto‑login, sesja interaktywna)..."
+            # Krótsze timeouty i pominięcie prób TLS = szybszy start dla zwykłego FTP.
+            # ftp:passive-mode no = tryb aktywny (PORT). W sieci HTB VPN Twój
+            # adres jest osiągalny dla maszyny docelowej, więc tryb aktywny
+            # zwykle naprawia problem serwerów zgłaszających zły wewnętrzny
+            # adres w trybie pasywnym (objaw: "mielenie"/reconnect przy ls,get).
+            lftp_tune="set net:timeout 5; set net:max-retries 1; set net:reconnect-interval-base 1; set ftp:ssl-allow no; set ftp:passive-mode no;"
+            if [[ -n "$s_user" ]]; then
+              lftp -u "$s_user","$s_pass" -e "$lftp_tune" "$target"
             else
-              clog "$C_GREEN" "Uruchamiam lftp (auto‑login, sesja interaktywna)..."
-              # Krótsze timeouty i pominięcie prób TLS = szybszy start dla zwykłego FTP
-              # ftp:passive-mode no = tryb aktywny (PORT). W sieci HTB VPN Twój
-              # adres jest osiągalny dla maszyny docelowej, więc tryb aktywny
-              # zwykle naprawia problem serwerów zgłaszających zły wewnętrzny
-              # adres w trybie pasywnym (objaw: "mielenie"/reconnect przy ls,get).
-              lftp_tune="set net:timeout 5; set net:max-retries 1; set net:reconnect-interval-base 1; set ftp:ssl-allow no; set ftp:passive-mode no;"
-              if [[ -n "$s_user" ]]; then
-                lftp -u "$s_user","$s_pass" -e "$lftp_tune" "$target"
-                else
-                  lftp -e "$lftp_tune" "$target"
-                  fi
-                  fi
-                  ;;
+              lftp -e "$lftp_tune" "$target"
+            fi
+          fi
+          ;;
         vnc)
           if command -v vncviewer >/dev/null 2>&1; then
             clog "$C_GREEN" "Uruchamiam vncviewer..."
