@@ -26,7 +26,7 @@ else
 fi
 
 target="" user="" pass="" user_set=0 pass_set=0
-max_attempts=15 delay_min=0 delay_max=0.3 protocols_arg="" output_file="" auto_yes=0 no_mask=0
+max_attempts=15 delay_min=0 delay_max=0.3 protocols_arg="" output_file="" auto_yes=0 no_mask=1
 
 help() {
   cat <<'HELP'
@@ -42,8 +42,9 @@ dla protokołów, dla których znaleziono przypisany port OPEN.
 --protocols         protokoły oddzielone przecinkami
 -o, --output        plik logu; poświadczenia maskowane w wyjściu nxc
 -y, --yes           pomiń potwierdzenie przy przekroczeniu limitu
---no-mask           nie maskuj haseł w logu/terminalu (gdy sam je znasz i nie
-                    udostępniasz logu dalej)
+--mask              maskuj hasła w logu/terminalu (domyślnie WYŁĄCZONE - hasła
+                    są jawne; użyj tej flagi przed udostępnieniem logu komuś
+                    innemu lub wrzuceniem go gdziekolwiek poza swój dysk)
 -h, --help          pomoc
 HELP
 }
@@ -60,7 +61,7 @@ while (($#)); do
     --protocols) need_value "$@"; protocols_arg="$2"; shift 2;;
     -o|--output) need_value "$@"; output_file="$2"; shift 2;;
     -y|--yes) auto_yes=1; shift;;
-    --no-mask) no_mask=1; shift;;
+    --mask) no_mask=0; shift;;
     -h|--help) help; exit 0;;
     *) echo "Nieznana opcja: $1 (użyj --help)." >&2; exit 1;;
   esac
@@ -243,7 +244,13 @@ literal_replace() {
 
 log "${C_CYAN}Tryb:${C_RESET} $mode"; log "${C_CYAN}Cel:${C_RESET} $target"; log "${C_CYAN}Otwarte porty:${C_RESET} $open_ports"; log "${C_CYAN}Protokoły po filtracji:${C_RESET} ${protocols[*]}"
 log "${C_CYAN}Wywołania nxc:${C_RESET} $run_count z $planned"; log "${C_CYAN}Opóźnienie:${C_RESET} ${delay_min}-${delay_max}s"
-[[ -n "$output_file" ]] && log "${C_CYAN}Log:${C_RESET} $output_file (hasła maskowane)"
+if [[ -n "$output_file" ]]; then
+  if ((no_mask)); then
+    log "${C_CYAN}Log:${C_RESET} $output_file ${C_YELLOW}(hasła JAWNE - użyj --mask, jeśli ten plik może trafić gdzieś dalej)${C_RESET}"
+  else
+    log "${C_CYAN}Log:${C_RESET} $output_file (hasła maskowane)"
+  fi
+fi
 
 declare -a rows=()
 declare -a raw_protos=()
