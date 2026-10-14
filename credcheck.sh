@@ -173,7 +173,7 @@ fi
 mask_pass() { local p="$1"; if [[ -z "$p" ]]; then printf '(puste)'; else printf '%*s' "${#p}" '' | tr ' ' '*'; fi; }
 literal_replace() {
   local text="$1" needle="$2" replacement="$3" before rest
-  [[ -n "$needle" ]] && { printf '%s' "$text"; return; }
+  [[ -z "$needle" ]] && { printf '%s' "$text"; return; }
   while [[ "$text" == *"$needle"* ]]; do
     before="${text%%"$needle"*}"; printf '%s%s' "$before" "$replacement"
     rest="${text#*"$needle"}"; text="$rest"
@@ -343,12 +343,16 @@ if ((${#valid_indices[@]} > 0)); then
             clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt update && sudo apt install -y lftp"
             else
               clog "$C_GREEN" "Uruchamiam lftp (auto‑login, sesja interaktywna)..."
+              # Krótsze timeouty i pominięcie prób TLS = szybszy start dla zwykłego FTP
+              # ftp:passive-mode no = tryb aktywny (PORT). W sieci HTB VPN Twój
+              # adres jest osiągalny dla maszyny docelowej, więc tryb aktywny
+              # zwykle naprawia problem serwerów zgłaszających zły wewnętrzny
+              # adres w trybie pasywnym (objaw: "mielenie"/reconnect przy ls,get).
+              lftp_tune="set net:timeout 5; set net:max-retries 1; set net:reconnect-interval-base 1; set ftp:ssl-allow no; set ftp:passive-mode no;"
               if [[ -n "$s_user" ]]; then
-                # jeśli masz usera, logujemy z hasłem
-                lftp -u "$s_user","$s_pass" "$target"
+                lftp -u "$s_user","$s_pass" -e "$lftp_tune" "$target"
                 else
-                  # brak usera – zwykłe połączenie (np. pure anonymous)
-                  lftp "$target"
+                  lftp -e "$lftp_tune" "$target"
                   fi
                   fi
                   ;;
