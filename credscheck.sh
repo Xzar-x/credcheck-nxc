@@ -222,7 +222,7 @@ clog "$C_CYAN" ">>> Nmap sprawdza w tle porty TCP: $port_list"
 clog "$C_CYAN" ">>> Cel: $target"
 scan_tmp="$(mktemp)" || exit 1
 trap 'rm -f "$scan_tmp"' EXIT
-nmap -n -Pn -sT --open -p "$port_list" -oG - "$target" >"$scan_tmp" 2>&1 &
+nmap -n -Pn -sT -T4 --max-retries 1 --host-timeout 15s --open -p "$port_list" -oG - "$target" >"$scan_tmp" 2>&1 &
 nmap_pid=$!
 wait "$nmap_pid"
 nmap_rc=$?
@@ -541,7 +541,11 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				p_pass="${raw_passes[$idx]}"
 				p_stat="${raw_statuses[$idx]}"
 				display_u="${p_user:-<pusty>}"
-				display_p="${p_pass:-<puste>}"
+				if ((no_mask)); then
+					display_p="${p_pass:-<puste>}"
+				else
+					display_p="$(mask_pass "$p_pass")"
+				fi
 				printf "  [%d] Protokół: %-5s | Użytkownik: %-12s | Hasło: %-20s (%s)\n" "$((opt_num + 1))" "$p_proto" "$display_u" "$display_p" "$p_stat"
 			done
 			if ((${#current_choices[@]} < ${#raw_statuses[@]})); then
@@ -704,20 +708,65 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				fi
 				;;
 			mssql)
+				cmd_mssql=""
 				if command -v impacket-mssqlclient >/dev/null 2>&1; then
-					clog "$C_GREEN" "Uruchamiam impacket-mssqlclient..."
-					# Format user:pass@host - dwukropek w haśle psuje parser.
-					# Gdy wykryjemy ':', ostrzegamy i próbujemy i tak (użytkownik może poprawić ręcznie).
+					cmd_mssql="impacket-mssqlclient"
+				elif command -v mssqlclient.py >/dev/null 2>&1; then
+					cmd_mssql="mssqlclient.py"
+				fi
+
+				if [[ -n "$cmd_mssql" ]]; then
+					clog "$C_GREEN" "Uruchamiam $cmd_mssql..."
 					if [[ "$s_pass" == *":"* ]]; then
 						clog "$C_YELLOW" "Uwaga: hasło zawiera ':' - format user:pass@host może się popsuć."
-						clog "$C_YELLOW" "Rozważ ręczne: impacket-mssqlclient '$s_user'@$target  (i podaj hasło)"
+						clog "$C_YELLOW" "Rozważ ręczne: $cmd_mssql '$s_user'@$target (i podaj hasło)"
 					fi
-					impacket-mssqlclient "${s_user}:${s_pass}@${target}"
+					"$cmd_mssql" "${s_user}:${s_pass}@${target}"
 				else
-					clog "$C_RED" "Błąd: Narzędzie 'impacket-mssqlclient' nie zostało znalezione w PATH."
-					clog "$C_YELLOW" "Zainstaluj pakiety Impacket:"
-					echo "  pip install impacket"
+					clog "$C_RED" "Błąd: Brak 'impacket-mssqlclient' ani 'mssqlclient.py' w PATH."
+					clog "$C_YELLOW" "Zainstaluj pakiet Impacket: sudo apt install python3-impacket (lub pipx install impacket)"
 				fi
+				;;
+			wmi)
+				cmd_wmi=""
+				if command -v impacket-wmiexec >/dev/null 2>&1; then
+					cmd_wmi="impacket-wmiexec"
+				elif command -v wmiexec.py >/dev/null 2>&1; then
+					cmd_wmi="wmiexec.py"
+				fi
+
+				if [[ -n "$cmd_wmi" ]]; then
+					clog "$C_GREEN" "Uruchamiam $cmd_wmi..."
+					if [[ -n "$s_pass" ]]; then
+						"$cmd_wmi" "${s_user}:${s_pass}@${target}"
+					else
+						"$cmd_wmi" "${s_user}@${target}"
+					fi
+				else
+					clog "$C_RED" "Błąd: Brak 'impacket-wmiexec' ani 'wmiexec.py' w PATH."
+					clog "$C_YELLOW" "Zainstaluj: sudo apt install python3-impacket"
+				fi
+				;;
+			nfs)
+				if command -v showmount >/dev/null 2>&1; then
+					clog "$C_GREEN" "Pobieram listę udziałów NFS (showmount -e $target)..."
+					showmount -e "$target"
+					echo ""
+					clog "$C_CYAN" "Aby zamontować udział:"
+					clog "$C_CYAN" "  sudo mount -t nfs $target:/<udzial> /mnt"
+				else
+					clog "$C_RED" "Błąd: Narzędzie 'showmount' nie zostało znalezione w PATH."
+					clog "$C_YELLOW" "Zainstaluj je poleceniem: sudo apt install nfs-common"
+				fi
+				;;
+			ldap)
+				clog "$C_GREEN" "Odpytuję kontroler domeny przez NetExec LDAP (--users)..."
+				nxc ldap "$target" -u "$s_user" -p "$s_pass" --users
+				echo ""
+				clog "$C_CYAN" "Przydatne moduły LDAP w nxc:"
+				clog "$C_CYAN" "  nxc ldap $target -u \"$s_user\" -p \"$s_pass\" --groups"
+				clog "$C_CYAN" "  nxc ldap $target -u \"$s_user\" -p \"$s_pass\" --active-users"
+				clog "$C_CYAN" "  nxc ldap $target -u \"$s_user\" -p \"$s_pass\" -M laps"
 				;;
 			*)
 				clog "$C_YELLOW" "Brak predefiniowanego klienta interaktywnego dla protokołu: $s_proto"
