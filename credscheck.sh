@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# credcheck.sh - skan Nmap portów wybranych protokołów, potem NetExec (nxc)
-# Użycie: ./credcheck.sh -t <target> [-u user -p pass] [--protocols smb,ssh] [-o log]
+# credscheck.sh - skan Nmap portów wybranych protokołów, potem NetExec (nxc)
+# Użycie: ./credscheck.sh -t <target> [-u user -p pass] [--protocols smb,ssh] [-o log]
 # Opcje: -t/--target, -u/--user, -p/--pass, -m/--max-attempts,
 # --delay-min, --delay-max, --protocols, -o/--output, -y/--yes,
 # --timeout, --no-launch, --mask, -h/--help
@@ -33,7 +33,7 @@ auto_yes=0 no_mask=1 no_launch=0 nxc_timeout=45
 
 help() {
 	cat <<'HELP'
-credcheck.sh - najpierw sprawdza Nmapem porty TCP, potem uruchamia nxc tylko
+credscheck.sh - najpierw sprawdza Nmapem porty TCP, potem uruchamia nxc tylko
 dla protokołów, dla których znaleziono przypisany port OPEN.
 
 -t, --target        IP/host celu (wymagane)
@@ -53,9 +53,9 @@ dla protokołów, dla których znaleziono przypisany port OPEN.
 -h, --help          pomoc
 
 Przykłady:
-  ./credcheck.sh -t 10.10.11.123
-  ./credcheck.sh -t 10.10.11.123 -u admin -p 'P@ssw0rd!'
-  ./credcheck.sh -t 10.10.11.123 --protocols smb,ssh,ftp --timeout 30 -n
+  ./credscheck.sh -t 10.10.11.123
+  ./credscheck.sh -t 10.10.11.123 -u admin -p 'P@ssw0rd!'
+  ./credscheck.sh -t 10.10.11.123 --protocols smb,ssh,ftp --timeout 30 -n
 HELP
 }
 
