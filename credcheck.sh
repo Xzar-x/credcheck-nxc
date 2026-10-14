@@ -509,28 +509,58 @@ for i in "${!raw_statuses[@]}"; do
 	fi
 done
 
-if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
-	echo ""
-	clog "$C_GREEN" ">>> Wykryto pasujące poświadczenia lub potencjalne sukcesy!"
-	read -r -p "Czy chcesz uruchomić zewnętrzne narzędzie i zalogować się do któregoś z serwisów? [t/N]: " launch_choice
-	if [[ "$launch_choice" =~ ^[TtYy] ]]; then
+if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
+	launch_choice="n"
+	if ((${#valid_indices[@]} > 0)); then
 		echo ""
-		clog "$C_CYAN" "Wybierz pozycję do połączenia:"
+		clog "$C_GREEN" ">>> Wykryto pasujące poświadczenia lub potencjalne sukcesy!"
+		read -r -p "Czy chcesz uruchomić zewnętrzne narzędzie i zalogować się do któregoś z serwisów? [t/N]: " launch_choice
+	else
+		echo ""
+		clog "$C_YELLOW" ">>> Brak potwierdzonych sukcesów w nxc."
+		read -r -p "Czy chcesz mimo to spróbować zalogować się do któregoś ze sprawdzonych serwisów (np. SSH/SMB/FTP)? [t/N]: " launch_choice
+	fi
 
-		for opt_num in "${!valid_indices[@]}"; do
-			idx="${valid_indices[$opt_num]}"
-			p_proto="${raw_protos[$idx]}"
-			p_user="${raw_users[$idx]}"
-			p_pass="${raw_passes[$idx]}"
-			p_stat="${raw_statuses[$idx]}"
-			display_u="${p_user:-<pusty>}"
-			display_p="${p_pass:-<puste>}"
-			printf "  [%d] Protokół: %s | Użytkownik: %s | Hasło: %s (%s)\n" "$((opt_num + 1))" "$p_proto" "$display_u" "$display_p" "$p_stat"
+	if [[ "$launch_choice" =~ ^[TtYy] ]]; then
+		declare -a current_choices=("${valid_indices[@]}")
+		if ((${#current_choices[@]} == 0)); then
+			for i in "${!raw_statuses[@]}"; do
+				current_choices+=("$i")
+			done
+		fi
+
+		choice_idx=""
+		while true; do
+			echo ""
+			clog "$C_CYAN" "Wybierz pozycję do połączenia:"
+
+			for opt_num in "${!current_choices[@]}"; do
+				idx="${current_choices[$opt_num]}"
+				p_proto="${raw_protos[$idx]}"
+				p_user="${raw_users[$idx]}"
+				p_pass="${raw_passes[$idx]}"
+				p_stat="${raw_statuses[$idx]}"
+				display_u="${p_user:-<pusty>}"
+				display_p="${p_pass:-<puste>}"
+				printf "  [%d] Protokół: %-5s | Użytkownik: %-12s | Hasło: %-20s (%s)\n" "$((opt_num + 1))" "$p_proto" "$display_u" "$display_p" "$p_stat"
+			done
+			if ((${#current_choices[@]} < ${#raw_statuses[@]})); then
+				printf "  [w] Pokaż wszystkie sprawdzone usługi (w tym odrzucone)\n"
+			fi
+
+			read -r -p "Wpisz numer opcji (lub wciśnij Enter, aby anulować): " choice_idx
+			if [[ "$choice_idx" =~ ^[Ww]$ ]] && ((${#current_choices[@]} < ${#raw_statuses[@]})); then
+				current_choices=()
+				for i in "${!raw_statuses[@]}"; do
+					current_choices+=("$i")
+				done
+				continue
+			fi
+			break
 		done
 
-		read -r -p "Wpisz numer opcji (lub wciśnij Enter, aby anulować): " choice_idx
-		if [[ "$choice_idx" =~ ^[0-9]+ ]] && ((choice_idx >= 1 && choice_idx <= ${#valid_indices[@]})); then
-			selected_array_idx="${valid_indices[$((choice_idx - 1))]}"
+		if [[ "$choice_idx" =~ ^[0-9]+ ]] && ((choice_idx >= 1 && choice_idx <= ${#current_choices[@]})); then
+			selected_array_idx="${current_choices[$((choice_idx - 1))]}"
 			s_proto="${raw_protos[$selected_array_idx]}"
 			s_user="${raw_users[$selected_array_idx]}"
 			s_pass="${raw_passes[$selected_array_idx]}"
@@ -542,11 +572,19 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
 			rdp)
 				if command -v xfreerdp >/dev/null 2>&1; then
 					clog "$C_GREEN" "Uruchamiam xfreerdp..."
-					if [[ -n "$s_pass" ]]; then
-						xfreerdp /v:"$target" /u:"$s_user" /p:"$s_pass" /dynamic-resolution +clipboard /cert:ignore
-					else
-						xfreerdp /v:"$target" /u:"$s_user" /dynamic-resolution +clipboard /cert:ignore
+					# Usunięto /dynamic-resolution oraz +clipboard – w maszynach wirtualnych (np. HTB)
+					# dynamiczne skalowanie kanału DVC (disp) powoduje błąd sterownika graficznego
+					# w Windows i natychmiastowe wylogowanie sesji użytkownika ("Signing out").
+					local rdp_args=(/v:"$target" /cert:ignore /f)
+					if [[ "$s_user" == *"\\"* ]]; then
+						rdp_args+=(/d:"${s_user%%\\*}" /u:"${s_user#*\\}")
+					elif [[ -n "$s_user" ]]; then
+						rdp_args+=(/u:"$s_user")
 					fi
+					if [[ -n "$s_pass" ]]; then
+						rdp_args+=(/p:"$s_pass")
+					fi
+					xfreerdp "${rdp_args[@]}"
 				else
 					clog "$C_RED" "Błąd: Narzędzie 'xfreerdp' nie zostało znalezione w PATH."
 					clog "$C_YELLOW" "Zainstaluj je poleceniem:"
@@ -585,13 +623,27 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
 				;;
 			smb)
 				if command -v smbclient >/dev/null 2>&1; then
-					clog "$C_GREEN" "Uruchamiam smbclient..."
-					# Nowoczesne smbclient obsługuje --password= (bezpieczniejsze przy znakach specjalnych niż user%pass)
+					clog "$C_GREEN" "Pobieram listę udziałów (smbclient -L)..."
+					local smb_has_pass_flag=0
 					if smbclient --help 2>&1 | grep -q -- '--password'; then
+						smb_has_pass_flag=1
 						smbclient -L "//$target" -U "$s_user" --password="$s_pass"
 					else
-						# Fallback dla starszych wersji
 						smbclient -L "//$target" -U "$s_user%$s_pass"
+					fi
+
+					echo ""
+					clog "$C_CYAN" "Aby wejść w interaktywną sesję SMB, podaj nazwę udziału (np. Devs, C$, Users):"
+					read -r -p "Nazwa udziału (lub Enter, aby zakończyć): " smb_share
+					smb_share="${smb_share#/}"
+					smb_share="${smb_share#\\}"
+					if [[ -n "$smb_share" ]]; then
+						clog "$C_GREEN" "Uruchamiam interaktywną sesję smbclient dla //$target/$smb_share..."
+						if ((smb_has_pass_flag)); then
+							smbclient "//$target/$smb_share" -U "$s_user" --password="$s_pass"
+						else
+							smbclient "//$target/$smb_share" -U "$s_user%$s_pass"
+						fi
 					fi
 				else
 					clog "$C_RED" "Błąd: Narzędzie 'smbclient' nie zostało znalezione w PATH."
@@ -648,7 +700,7 @@ if ((${#valid_indices[@]} > 0)) && ((no_launch == 0)); then
 				else
 					clog "$C_RED" "Błąd: Narzędzie 'evil-winrm' nie zostało znalezione w PATH."
 					clog "$C_YELLOW" "Zainstaluj je poleceniem:"
-					echo "  gem install evil-winrm"
+					echo "  sudo apt install evil-winrm"
 				fi
 				;;
 			mssql)
