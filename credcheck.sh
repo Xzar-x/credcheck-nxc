@@ -1,0 +1,783 @@
+#!/usr/bin/env bash
+# credscheck.sh - scans TCP ports for selected protocols with Nmap, then runs NetExec (nxc)
+# Usage: ./credscheck.sh -t <target> [-u user -p pass] [--protocols smb,ssh] [-o log]
+# Options: -t/--target, -u/--user, -p/--pass, -m/--max-attempts,
+# --delay-min, --delay-max, --protocols, -o/--output, -y/--yes,
+# --timeout, --no-launch, --mask, -h/--help
+# Use only on your own infrastructure or with the owner's permission.
+# Primarily intended for HTB labs / your own testing.
+
+set -u
+set -o pipefail
+
+# ANSI colors — automatically disabled when stdout is not a terminal
+if [[ -t 1 ]]; then
+	C_RESET='\033[0m'
+	C_BOLD='\033[1m'
+	C_RED='\033[1;31m'
+	C_GREEN='\033[1;32m'
+	C_YELLOW='\033[1;33m'
+	C_CYAN='\033[1;36m'
+	C_WHITE='\033[1;37m'
+	C_BG_GREEN='\033[48;5;22m'
+	C_BG_YELLOW='\033[48;5;94m'
+	C_DIM='\033[2m'
+else
+	C_RESET='' C_BOLD='' C_RED='' C_GREEN='' C_YELLOW=''
+	C_CYAN='' C_WHITE='' C_BG_GREEN='' C_BG_YELLOW='' C_DIM=''
+fi
+
+target="" user="" pass="" user_set=0 pass_set=0
+max_attempts=15 delay_min=0 delay_max=0.3 protocols_arg="" output_file=""
+auto_yes=0 no_mask=1 no_launch=0 nxc_timeout=45
+
+help() {
+	cat <<'HELP'
+credscheck.sh - first checks TCP ports with Nmap, then runs nxc only for
+protocols whose assigned port was found OPEN.
+
+-t, --target        target IP/host (required)
+-u, --user          username
+-p, --pass          password (can be empty: -p "")
+-m, --max-attempts  max number of nxc calls (default 15)
+--delay-min         minimum delay in seconds (default 0)
+--delay-max         maximum delay in seconds (default 0.3)
+--protocols         comma-separated protocols
+-o, --output        log file
+-y, --yes           skip confirmation when the limit is exceeded
+--timeout SEC       timeout for a single nxc call in seconds (default 45)
+-n, --no-launch     don't ask to launch an interactive client at the end
+--mask              mask passwords in the log/terminal (DISABLED by default -
+                    passwords are shown in plain text; use this flag before
+                    sharing the log with anyone else or uploading it anywhere
+                    outside your own disk)
+-h, --help          show help
+
+Examples:
+  ./credscheck.sh -t 10.10.11.123
+  ./credscheck.sh -t 10.10.11.123 -u admin -p 'P@ssw0rd!'
+  ./credscheck.sh -t 10.10.11.123 --protocols smb,ssh,ftp --timeout 30 -n
+HELP
+}
+
+need_value() { if (($# < 2)); then
+	echo "Error: $1 requires a value." >&2
+	exit 1
+fi; }
+while (($#)); do
+	case "$1" in
+	-t | --target)
+		need_value "$@"
+		target="$2"
+		shift 2
+		;;
+	-u | --user)
+		need_value "$@"
+		user="$2"
+		user_set=1
+		shift 2
+		;;
+	-p | --pass)
+		need_value "$@"
+		pass="$2"
+		pass_set=1
+		shift 2
+		;;
+	-m | --max-attempts)
+		need_value "$@"
+		max_attempts="$2"
+		shift 2
+		;;
+	--delay-min)
+		need_value "$@"
+		delay_min="$2"
+		shift 2
+		;;
+	--delay-max)
+		need_value "$@"
+		delay_max="$2"
+		shift 2
+		;;
+	--protocols)
+		need_value "$@"
+		protocols_arg="$2"
+		shift 2
+		;;
+	-o | --output)
+		need_value "$@"
+		output_file="$2"
+		shift 2
+		;;
+	--timeout)
+		need_value "$@"
+		nxc_timeout="$2"
+		shift 2
+		;;
+	-y | --yes)
+		auto_yes=1
+		shift
+		;;
+	-n | --no-launch)
+		no_launch=1
+		shift
+		;;
+	--mask)
+		no_mask=0
+		shift
+		;;
+	-h | --help)
+		help
+		exit 0
+		;;
+	*)
+		echo "Unknown option: $1 (use --help)." >&2
+		exit 1
+		;;
+	esac
+done
+[[ -n "$target" ]] || {
+	echo "Error: -t/--target is required." >&2
+	exit 1
+}
+[[ "$max_attempts" =~ ^[0-9]+ ]] && ((10#$max_attempts >= 1)) || {
+	echo "Error: --max-attempts must be >= 1." >&2
+	exit 1
+}
+max_attempts=$((10#$max_attempts))
+[[ "$nxc_timeout" =~ ^[0-9]+ ]] && ((10#$nxc_timeout >= 5)) || {
+	echo "Error: --timeout must be a number >= 5." >&2
+	exit 1
+}
+nxc_timeout=$((10#$nxc_timeout))
+valid_num() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
+valid_num "$delay_min" && valid_num "$delay_max" || {
+	echo "Error: delays must be non-negative numbers." >&2
+	exit 1
+}
+awk -v a="$delay_min" -v b="$delay_max" 'BEGIN{exit !(a<=b)}' || {
+	echo "Error: delay-min > delay-max." >&2
+	exit 1
+}
+((user_set == pass_set)) || {
+	echo "Error: provide both -u and -p, or neither." >&2
+	exit 1
+}
+
+if [[ -n "$protocols_arg" ]]; then
+	IFS=',' read -r -a protocols <<<"$protocols_arg"
+	for i in "${!protocols[@]}"; do
+		protocols[$i]="${protocols[$i]//[[:space:]]/}"
+		protocols[$i]="${protocols[$i],,}"
+		[[ -n "${protocols[$i]}" ]] || {
+			echo "Error: empty protocol name." >&2
+			exit 1
+		}
+	done
+else
+	protocols=(smb ssh ftp winrm mssql rdp ldap wmi nfs vnc)
+fi
+
+# Common TCP ports. OPEN is only a preliminary filter, not proof the actual protocol is running.
+declare -A proto_ports=(
+	[smb]="445" [ssh]="22" [ftp]="21" [winrm]="5985,5986"
+	[mssql]="1433" [rdp]="3389" [ldap]="389,636,3268,3269"
+	[wmi]="135,139,445" [nfs]="111,2049" [vnc]="5900-5903"
+)
+declare -A port_set=()
+for proto in "${protocols[@]}"; do
+	[[ -n "${proto_ports[$proto]+x}" ]] || {
+		echo "Error: unsupported protocol '$proto'. Allowed: ${!proto_ports[*]}" >&2
+		exit 1
+	}
+	IFS=',' read -r -a pp <<<"${proto_ports[$proto]}"
+	for port in "${pp[@]}"; do port_set["$port"]=1; done
+done
+port_list="$(printf '%s\n' "${!port_set[@]}" | sort -n | paste -sd, -)"
+
+command -v nmap >/dev/null 2>&1 || {
+	echo "Error: nmap not found in PATH." >&2
+	exit 1
+}
+command -v nxc >/dev/null 2>&1 || {
+	echo "Error: nxc not found in PATH." >&2
+	exit 1
+}
+if [[ -n "$output_file" ]]; then
+	: >"$output_file" 2>/dev/null || {
+		echo "Error: cannot write log file: $output_file" >&2
+		exit 1
+	}
+fi
+
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' <<<"$1"; }
+log() {
+	printf '%b\n' "$1"
+	[[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$1")" >>"$output_file"
+}
+clog() {
+	printf '%b\n' "${1}${2}${C_RESET}"
+	[[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$2")" >>"$output_file"
+}
+
+clog "$C_CYAN" ">>> Nmap is checking TCP ports in the background: $port_list"
+clog "$C_CYAN" ">>> Target: $target"
+scan_tmp="$(mktemp)" || exit 1
+trap 'rm -f "$scan_tmp"' EXIT
+nmap -n -Pn -sT -T4 --max-retries 1 --host-timeout 15s --open -p "$port_list" -oG - "$target" >"$scan_tmp" 2>&1 &
+nmap_pid=$!
+wait "$nmap_pid"
+nmap_rc=$?
+if ((nmap_rc != 0)); then
+	printf '%b\n' "${C_RED}Nmap error (code $nmap_rc): ${C_RESET}" >&2
+	cat "$scan_tmp" >&2
+	exit 1
+fi
+
+open_ports=""
+while IFS= read -r line; do
+	[[ "$line" == *"Ports:"* ]] || continue
+	field="${line#*Ports: }"
+	IFS=',' read -r -a entries <<<"$field"
+	for entry in "${entries[@]}"; do
+		if [[ "$entry" =~ ^[[:space:]]*([0-9]+)/open/tcp/ ]]; then
+			port="${BASH_REMATCH[1]}"
+			[[ ",$open_ports," == *,$port,* ]] || open_ports+="${open_ports:+,}$port"
+		fi
+	done
+done <"$scan_tmp"
+if [[ -z "$open_ports" ]]; then
+	clog "$C_YELLOW" ">>> No open ports detected from the selected list. Not running nxc."
+	[[ -n "$output_file" ]] && printf 'Target: %s\nScanned ports: %s\nResult: no OPEN ports\n' "$target" "$port_list" >>"$output_file"
+	exit 0
+fi
+clog "$C_GREEN" ">>> Open TCP ports: $open_ports"
+
+declare -a active_protocols=()
+for proto in "${protocols[@]}"; do
+	found=0
+	IFS=',' read -r -a pp <<<"${proto_ports[$proto]}"
+	for port in "${pp[@]}"; do
+		if [[ "$port" == *-* ]]; then
+			lo=$((10#${port%-*}))
+			hi=$((10#${port#*-}))
+			for n in $(seq "$lo" "$hi"); do
+				[[ ",$open_ports," == *,$n,* ]] && found=1
+			done
+		else
+			[[ ",$open_ports," == *,$port,* ]] && found=1
+		fi
+	done
+	if ((found)); then
+		active_protocols+=("$proto")
+	else
+		clog "$C_DIM" ">>> Skipping $proto — assigned ports are not OPEN."
+	fi
+done
+((${#active_protocols[@]})) || {
+	echo ">>> Nothing to check."
+	exit 0
+}
+protocols=("${active_protocols[@]}")
+
+# Protocols where anonymous/guest/null make no protocol-level sense
+# (SSH/WinRM/RDP require a real account - there is no concept of an "anonymous
+# login" for them). In blind mode they only get a single availability probe
+# instead of the full list of 6 attempts, which have no real chance of
+# succeeding except by pure coincidence of a misconfiguration.
+declare -A blind_minimal=([ssh]=1 [winrm]=1 [rdp]=1)
+
+# Additional, commonly known default vendor/installer credentials - deliberately
+# ONLY for mssql (SQL Server auth rarely has a lockout policy). I'm intentionally
+# skipping SMB/WinRM/RDP - accounts there usually live in Active Directory with
+# a lockout policy, and guessing "admin:admin" carries a real risk of locking
+# someone's account out, not just a technical failed attempt.
+declare -A extra_defaults=([mssql]="sa:sa sa: sa:Password123 sa:admin")
+
+if ((user_set)); then
+	mode="Test of supplied credentials"
+else
+	mode="Test anonymous/guest/null (SSH/WinRM/RDP: availability probe only)"
+fi
+
+get_creds_for_proto() {
+	local proto="$1"
+	if ((user_set)); then
+		proto_users=("$user")
+		proto_passwords=("$pass")
+	elif [[ -n "${blind_minimal[$proto]:-}" ]]; then
+		proto_users=("")
+		proto_passwords=("")
+	else
+		proto_users=(anonymous anonymous "" guest guest null)
+		proto_passwords=(anonymous "" "" guest "" null)
+		if [[ -n "${extra_defaults[$proto]:-}" ]]; then
+			local pair u2 p2
+			for pair in ${extra_defaults[$proto]}; do
+				IFS=':' read -r u2 p2 <<<"$pair"
+				proto_users+=("$u2")
+				proto_passwords+=("$p2")
+			done
+		fi
+	fi
+}
+
+planned=0
+for proto in "${protocols[@]}"; do
+	get_creds_for_proto "$proto"
+	planned=$((planned + ${#proto_users[@]}))
+done
+run_count=$planned
+if ((planned > max_attempts)); then
+	echo "Plan after filtering: $planned nxc calls; limit: $max_attempts."
+	if ((auto_yes == 0)); then
+		read -r -p "Continue with the limit? [y/N]: " confirm
+		[[ "$confirm" =~ ^[Yy] ]] || {
+			echo "Aborted."
+			exit 1
+		}
+	fi
+	run_count=$max_attempts
+fi
+
+mask_pass() {
+	local p="$1"
+	if [[ -z "$p" ]]; then printf '(empty)'; else printf '%*s' "${#p}" '' | tr ' ' '*'; fi
+}
+
+# Sorts an array (via nameref) in descending order by string length - pure bash,
+# no piping through external tools (safe even for secrets containing spaces or
+# special characters). Needed so masking a shorter password (e.g. "pass")
+# doesn't corrupt a fragment of a longer password (e.g. "password").
+sort_by_length_desc() {
+	local -n arr_ref=$1
+	local i j tmp n=${#arr_ref[@]}
+	for ((i = 1; i < n; i++)); do
+		tmp="${arr_ref[i]}"
+		j=$((i - 1))
+		while ((j >= 0)) && ((${#arr_ref[j]} < ${#tmp})); do
+			arr_ref[j + 1]="${arr_ref[j]}"
+			j=$((j - 1))
+		done
+		arr_ref[j + 1]="$tmp"
+	done
+}
+literal_replace() {
+	local text="$1" needle="$2" replacement="$3" before rest
+	[[ -z "$needle" ]] && {
+		printf '%s' "$text"
+		return
+	}
+	while [[ "$text" == *"$needle"* ]]; do
+		before="${text%%"$needle"*}"
+		printf '%s%s' "$before" "$replacement"
+		rest="${text#*"$needle"}"
+		text="$rest"
+	done
+	printf '%s' "$text"
+}
+
+log "${C_CYAN}Mode: ${C_RESET}$mode"
+log "${C_CYAN}Target:${C_RESET}$target"
+log "${C_CYAN}Open ports:${C_RESET}$open_ports"
+log "${C_CYAN}Protocols after filtering:${C_RESET} ${protocols[*]}"
+log "${C_CYAN}nxc calls: ${C_RESET}$run_count of $planned"
+log "${C_CYAN}Delay:${C_RESET}${delay_min}-${delay_max}s"
+log "${C_CYAN}nxc timeout: ${C_RESET}${nxc_timeout}s"
+if [[ -n "$output_file" ]]; then
+	if ((no_mask)); then
+		log "${C_CYAN}Log: ${C_RESET}$output_file ${C_YELLOW}(passwords in PLAIN TEXT - use --mask if this file might end up anywhere else) ${C_RESET}"
+	else
+		log "${C_CYAN}Log: ${C_RESET}$output_file (passwords masked)"
+	fi
+fi
+
+declare -a rows=()
+declare -a raw_protos=()
+declare -a raw_users=()
+declare -a raw_passes=()
+declare -a raw_statuses=()
+
+attempt=0
+for proto in "${protocols[@]}"; do
+	get_creds_for_proto "$proto"
+	for idx in "${!proto_users[@]}"; do
+		((attempt < run_count)) || break
+		u="${proto_users[$idx]}"
+		p="${proto_passwords[$idx]}"
+		if ((no_mask)); then pm="${p:-(empty)}"; else pm="$(mask_pass "$p")"; fi
+		((attempt += 1))
+		probe_note=""
+		((user_set == 0)) && [[ -n "${blind_minimal[$proto]:-}" ]] && probe_note=" ${C_DIM}(availability probe, not credential guessing)${C_RESET}"
+		log "${C_BOLD}${C_WHITE}######### [$attempt/$run_count] $proto -- $u:$pm #########${probe_note}${C_RESET}"
+		start=$(date +%s)
+		# timeout protects against hanging connections (especially HTB VPN / slow network)
+		output=$(timeout "${nxc_timeout}s" nxc "$proto" "$target" -u "$u" -p "$p" 2>&1)
+		rc=$?
+		end=$(date +%s)
+		masked="$output"
+		if ((no_mask == 0)); then
+			mask_targets=()
+			for secret in "$p" "${proto_passwords[@]}"; do
+				[[ -z "$secret" ]] && continue
+				already=0
+				for seen in "${mask_targets[@]:-}"; do [[ "$seen" == "$secret" ]] && {
+					already=1
+					break
+				}; done
+				((already)) || mask_targets+=("$secret")
+			done
+			sort_by_length_desc mask_targets
+			for secret in "${mask_targets[@]}"; do masked="$(literal_replace "$masked" "$secret" "$(mask_pass "$secret")")"; done
+		fi
+		log "$masked"
+		log ""
+		status="UNKNOWN"
+		info=""
+		if ((rc == 124)); then
+			status="TIMEOUT"
+			info="exceeded ${nxc_timeout}s"
+		elif grep -qiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable|could not connect' <<<"$output"; then
+			status="CONNECTION FAILED"
+			info="$(grep -oiE 'connection refused|connection error|timed? ?out|no route to host|network is unreachable|could not connect' <<<"$output" | head -1)"
+		elif ((rc != 0)); then
+			status="NXC ERROR"
+			info="exit code $rc"
+		elif grep -qiE '\[\+\].*(Pwn3d!|logged in|login successful|authenticated|anonymous login)' <<<"$output"; then
+			status="SUCCESS - CONFIRMED PATTERN"
+		elif grep -qE '\[\+\]' <<<"$output"; then
+			status="POSSIBLE SUCCESS - NEEDS VERIFICATION"
+		elif grep -qE '\[-\]' <<<"$output"; then
+			status="REJECTED / NO SUCCESS"
+		fi
+
+		rows+=("$proto|$u:$pm|$status|$((end - start))s|$info")
+
+		raw_protos+=("$proto")
+		raw_users+=("$u")
+		raw_passes+=("$p")
+		raw_statuses+=("$status")
+
+		if ((attempt < run_count)); then
+			delay=$(awk -v r="$RANDOM" -v min="$delay_min" -v max="$delay_max" 'BEGIN{srand(r); printf "%.2f", min+rand()*(max-min)}')
+			log "Waiting ${delay}s..."
+			sleep "$delay"
+		fi
+	done
+	((attempt >= run_count)) && break
+done
+if ((planned > run_count)); then log "Stopped after $run_count calls; skipped $((planned - run_count)) combinations."; fi
+log "${C_BOLD}${C_CYAN}==================================================================${C_RESET}"
+log "${C_BOLD}${C_WHITE}                          SUMMARY${C_RESET}"
+log "${C_BOLD}${C_CYAN}==================================================================${C_RESET}"
+header="$(printf '%-8s %-25s %-32s %-8s %-s' PROTO CREDS STATUS TIME INFO)"
+log "${C_BOLD}${C_WHITE}${header}${C_RESET}"
+log "${C_DIM}$(printf '%0.s─' {1..85})${C_RESET}"
+confirmed=0 uncertain=0
+for row in "${rows[@]}"; do
+	IFS='|' read -r proto creds status elapsed info <<<"$row"
+	line="$(printf '%-8s %-25s %-32s %-8s %-s' "$proto" "$creds" "$status" "$elapsed" "$info")"
+	if [[ "$status" == "SUCCESS - CONFIRMED PATTERN" ]]; then
+		log "${C_BG_GREEN}${C_WHITE}${C_BOLD}${line}${C_RESET}"
+		((confirmed += 1))
+	elif [[ "$status" == "POSSIBLE SUCCESS - NEEDS VERIFICATION" ]]; then
+		log "${C_BG_YELLOW}${C_BOLD}${line}${C_RESET}"
+		((uncertain += 1))
+	elif [[ "$status" == "REJECTED / NO SUCCESS" ]]; then
+		log "${C_RED}${line}${C_RESET}"
+	elif [[ "$status" == "CONNECTION FAILED" ]] || [[ "$status" == "NXC ERROR" ]] || [[ "$status" == "TIMEOUT" ]]; then
+		log "${C_DIM}${line}${C_RESET}"
+	else
+		log "$line"
+	fi
+done
+log "${C_DIM}$(printf '%0.s─' {1..85})${C_RESET}"
+if ((confirmed > 0)); then
+	log "${C_BG_GREEN}${C_WHITE}${C_BOLD} ✔ Successes with confirmed pattern: $confirmed / ${#rows[@]} ${C_RESET}"
+else
+	log "${C_DIM}  Successes with confirmed pattern: $confirmed / ${#rows[@]}${C_RESET}"
+fi
+if ((uncertain > 0)); then
+	log "${C_BG_YELLOW}${C_BOLD} ⚠ Possible successes requiring manual verification: $uncertain / ${#rows[@]} ${C_RESET}"
+else
+	log "${C_DIM}  Possible successes requiring manual verification: $uncertain / ${#rows[@]}${C_RESET}"
+fi
+log "${C_CYAN}Note: ${C_RESET} the meaning of \"[+]\" differs between protocols; verify results manually."
+
+declare -a valid_indices=()
+for i in "${!raw_statuses[@]}"; do
+	st="${raw_statuses[$i]}"
+	if [[ "$st" == "SUCCESS - CONFIRMED PATTERN" ]] || [[ "$st" == "POSSIBLE SUCCESS - NEEDS VERIFICATION" ]]; then
+		valid_indices+=("$i")
+	fi
+done
+
+if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
+	launch_choice="n"
+	if ((${#valid_indices[@]} > 0)); then
+		echo ""
+		clog "$C_GREEN" ">>> Matching credentials or potential successes detected!"
+		read -r -p "Do you want to launch an external tool and log in to one of the services? [y/N]: " launch_choice
+	else
+		echo ""
+		clog "$C_YELLOW" ">>> No confirmed successes in nxc."
+		read -r -p "Do you want to try logging in to one of the checked services anyway (e.g. SSH/SMB/FTP)? [y/N]: " launch_choice
+	fi
+
+	if [[ "$launch_choice" =~ ^[Yy] ]]; then
+		declare -a current_choices=("${valid_indices[@]}")
+		if ((${#current_choices[@]} == 0)); then
+			for i in "${!raw_statuses[@]}"; do
+				current_choices+=("$i")
+			done
+		fi
+
+		choice_idx=""
+		while true; do
+			echo ""
+			clog "$C_CYAN" "Select an entry to connect to:"
+
+			for opt_num in "${!current_choices[@]}"; do
+				idx="${current_choices[$opt_num]}"
+				p_proto="${raw_protos[$idx]}"
+				p_user="${raw_users[$idx]}"
+				p_pass="${raw_passes[$idx]}"
+				p_stat="${raw_statuses[$idx]}"
+				display_u="${p_user:-<empty>}"
+				if ((no_mask)); then
+					display_p="${p_pass:-<empty>}"
+				else
+					display_p="$(mask_pass "$p_pass")"
+				fi
+				printf "  [%d] Protocol: %-5s | User: %-12s | Password: %-20s (%s)\n" "$((opt_num + 1))" "$p_proto" "$display_u" "$display_p" "$p_stat"
+			done
+			if ((${#current_choices[@]} < ${#raw_statuses[@]})); then
+				printf "  [a] Show all checked services (including rejected)\n"
+			fi
+
+			read -r -p "Enter the option number (or press Enter to cancel): " choice_idx
+			if [[ "$choice_idx" =~ ^[Aa]$ ]] && ((${#current_choices[@]} < ${#raw_statuses[@]})); then
+				current_choices=()
+				for i in "${!raw_statuses[@]}"; do
+					current_choices+=("$i")
+				done
+				continue
+			fi
+			break
+		done
+
+		if [[ "$choice_idx" =~ ^[0-9]+ ]] && ((choice_idx >= 1 && choice_idx <= ${#current_choices[@]})); then
+			selected_array_idx="${current_choices[$((choice_idx - 1))]}"
+			s_proto="${raw_protos[$selected_array_idx]}"
+			s_user="${raw_users[$selected_array_idx]}"
+			s_pass="${raw_passes[$selected_array_idx]}"
+
+			echo ""
+			clog "$C_CYAN" ">>> Selected: protocol $s_proto for target $target (user: ${s_user:-<empty>})"
+
+			case "$s_proto" in
+			rdp)
+				if command -v xfreerdp >/dev/null 2>&1; then
+					clog "$C_GREEN" "Launching xfreerdp..."
+					# Removed /dynamic-resolution and +clipboard – on virtual machines (e.g. HTB)
+					# dynamic scaling of the DVC (disp) channel causes a graphics driver error
+					# on Windows and an immediate user session sign-out ("Signing out").
+					rdp_args=(/v:"$target" /cert:ignore /f)
+					if [[ "$s_user" == *"\\"* ]]; then
+						rdp_args+=(/d:"${s_user%%\\*}" /u:"${s_user#*\\}")
+					elif [[ -n "$s_user" ]]; then
+						rdp_args+=(/u:"$s_user")
+					fi
+					if [[ -n "$s_pass" ]]; then
+						rdp_args+=(/p:"$s_pass")
+					fi
+					xfreerdp "${rdp_args[@]}"
+				else
+					clog "$C_RED" "Error: 'xfreerdp' not found in PATH."
+					clog "$C_YELLOW" "Install it with:"
+					echo "  sudo apt update && sudo apt install -y freerdp2-x11"
+				fi
+				;;
+			ssh)
+				# Prefer sshpass (automatic password entry) – speeds up the HTB workflow.
+				# Falls back to plain ssh (password entered manually).
+				if [[ -n "$s_pass" ]] && command -v sshpass >/dev/null 2>&1; then
+					clog "$C_GREEN" "Launching ssh + sshpass (password supplied automatically)..."
+					if [[ -n "$s_user" ]]; then
+						sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "${s_user}@${target}"
+					else
+						sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "$target"
+					fi
+				elif command -v ssh >/dev/null 2>&1; then
+					if [[ -n "$s_pass" ]]; then
+						clog "$C_YELLOW" "Note: 'sshpass' not found – you'll need to type the password manually."
+						clog "$C_YELLOW" "To have the password entered automatically, install:"
+						echo "  sudo apt update && sudo apt install -y sshpass"
+					fi
+					clog "$C_GREEN" "Launching ssh (type the password manually)..."
+					if [[ -n "$s_user" ]]; then
+						ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "${s_user}@${target}"
+					else
+						ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "$target"
+					fi
+				else
+					clog "$C_RED" "Error: 'ssh' not found in PATH."
+					clog "$C_YELLOW" "Install: sudo apt install openssh-client"
+					if [[ -n "$s_pass" ]]; then
+						clog "$C_YELLOW" "Additionally, for automatic password entry: sudo apt install sshpass"
+					fi
+				fi
+				;;
+			smb)
+				if command -v smbclient >/dev/null 2>&1; then
+					clog "$C_GREEN" "Fetching the share list (smbclient -L)..."
+					smb_has_pass_flag=0
+					if smbclient --help 2>&1 | grep -q -- '--password'; then
+						smb_has_pass_flag=1
+						smbclient -L "//$target" -U "$s_user" --password="$s_pass"
+					else
+						smbclient -L "//$target" -U "$s_user%$s_pass"
+					fi
+
+					echo ""
+					clog "$C_CYAN" "To enter an interactive SMB session, enter the share name (e.g. Devs, C$, Users):"
+					read -r -p "Share name (or Enter to finish): " smb_share
+					smb_share="${smb_share#/}"
+					smb_share="${smb_share#\\}"
+					if [[ -n "$smb_share" ]]; then
+						clog "$C_GREEN" "Launching an interactive smbclient session for //$target/$smb_share..."
+						if ((smb_has_pass_flag)); then
+							smbclient "//$target/$smb_share" -U "$s_user" --password="$s_pass"
+						else
+							smbclient "//$target/$smb_share" -U "$s_user%$s_pass"
+						fi
+					fi
+				else
+					clog "$C_RED" "Error: 'smbclient' not found in PATH."
+					clog "$C_YELLOW" "Install it with:"
+					echo "  sudo apt update && sudo apt install -y smbclient"
+				fi
+				;;
+			ftp)
+				if ! command -v lftp >/dev/null 2>&1; then
+					clog "$C_RED" "Error: 'lftp' not found in PATH."
+					clog "$C_YELLOW" "Install it with: sudo apt update && sudo apt install -y lftp"
+				else
+					clog "$C_GREEN" "Launching lftp (auto-login, interactive session)..."
+					# lftp configuration:
+					# - net:timeout 20: FTP servers (e.g. ProFTPD) perform a reverse DNS lookup on
+					#   the client's VPN IP (10.10.x.x), which on HTB labs adds a ~10s delay before
+					#   the 220 banner is sent. An earlier 5s timeout caused an immediate
+					#   "max-retries exceeded" error.
+					# - net:max-retries 2: prevents the session from being cut off by a brief lag.
+					# - ftp:fix-pasv-address yes: corrects a bad private IP returned by the server in PASV.
+					# - ftp:auto-passive-mode yes: uses PASV by default, falling back to active mode (PORT).
+					# - ftp:ssl-allow no: skips unnecessary TLS negotiation attempts for plain FTP.
+					lftp_tune="set net:timeout 20; set net:max-retries 2; set net:reconnect-interval-base 2; set ftp:ssl-allow no; set ftp:fix-pasv-address yes; set ftp:auto-passive-mode yes;"
+					if [[ -n "$s_user" ]]; then
+						if [[ "$s_pass" == *","* ]]; then
+							# When the password contains a comma, the -u user,pass switch misparses it.
+							# lftp's 'user' command takes separate arguments and handles commas correctly.
+							lftp -e "${lftp_tune} user \"${s_user//\"/\\\"}\" \"${s_pass//\"/\\\"}\";" "$target"
+						else
+							lftp -u "$s_user","$s_pass" -e "$lftp_tune" "$target"
+						fi
+					else
+						lftp -e "$lftp_tune" "$target"
+					fi
+				fi
+				;;
+			vnc)
+				if command -v vncviewer >/dev/null 2>&1; then
+					clog "$C_GREEN" "Launching vncviewer..."
+					# Most vncviewer builds will prompt for the password interactively anyway
+					vncviewer "$target"
+				else
+					clog "$C_RED" "Error: 'vncviewer' not found in PATH."
+					clog "$C_YELLOW" "Install it with: sudo apt install tigervnc-viewer"
+				fi
+				;;
+			winrm)
+				if command -v evil-winrm >/dev/null 2>&1; then
+					clog "$C_GREEN" "Launching evil-winrm..."
+					if [[ -n "$s_pass" ]]; then
+						evil-winrm -i "$target" -u "$s_user" -p "$s_pass"
+					else
+						evil-winrm -i "$target" -u "$s_user"
+					fi
+				else
+					clog "$C_RED" "Error: 'evil-winrm' not found in PATH."
+					clog "$C_YELLOW" "Install it with:"
+					echo "  sudo apt install evil-winrm"
+				fi
+				;;
+			mssql)
+				cmd_mssql=""
+				if command -v impacket-mssqlclient >/dev/null 2>&1; then
+					cmd_mssql="impacket-mssqlclient"
+				elif command -v mssqlclient.py >/dev/null 2>&1; then
+					cmd_mssql="mssqlclient.py"
+				fi
+
+				if [[ -n "$cmd_mssql" ]]; then
+					clog "$C_GREEN" "Launching $cmd_mssql..."
+					if [[ "$s_pass" == *":"* ]]; then
+						clog "$C_YELLOW" "Note: password contains ':' - the user:pass@host format may break."
+						clog "$C_YELLOW" "Consider doing it manually: $cmd_mssql '$s_user'@$target (and enter the password)"
+					fi
+					"$cmd_mssql" "${s_user}:${s_pass}@${target}"
+				else
+					clog "$C_RED" "Error: neither 'impacket-mssqlclient' nor 'mssqlclient.py' found in PATH."
+					clog "$C_YELLOW" "Install the Impacket package: sudo apt install python3-impacket (or pipx install impacket)"
+				fi
+				;;
+			wmi)
+				cmd_wmi=""
+				if command -v impacket-wmiexec >/dev/null 2>&1; then
+					cmd_wmi="impacket-wmiexec"
+				elif command -v wmiexec.py >/dev/null 2>&1; then
+					cmd_wmi="wmiexec.py"
+				fi
+
+				if [[ -n "$cmd_wmi" ]]; then
+					clog "$C_GREEN" "Launching $cmd_wmi..."
+					if [[ -n "$s_pass" ]]; then
+						"$cmd_wmi" "${s_user}:${s_pass}@${target}"
+					else
+						"$cmd_wmi" "${s_user}@${target}"
+					fi
+				else
+					clog "$C_RED" "Error: neither 'impacket-wmiexec' nor 'wmiexec.py' found in PATH."
+					clog "$C_YELLOW" "Install: sudo apt install python3-impacket"
+				fi
+				;;
+			nfs)
+				if command -v showmount >/dev/null 2>&1; then
+					clog "$C_GREEN" "Fetching the NFS share list (showmount -e $target)..."
+					showmount -e "$target"
+					echo ""
+					clog "$C_CYAN" "To mount a share:"
+					clog "$C_CYAN" "  sudo mount -t nfs $target:/<share> /mnt"
+				else
+					clog "$C_RED" "Error: 'showmount' not found in PATH."
+					clog "$C_YELLOW" "Install it with: sudo apt install nfs-common"
+				fi
+				;;
+			ldap)
+				clog "$C_GREEN" "Querying the domain controller via NetExec LDAP (--users)..."
+				nxc ldap "$target" -u "$s_user" -p "$s_pass" --users
+				echo ""
+				clog "$C_CYAN" "Useful LDAP modules in nxc:"
+				clog "$C_CYAN" "  nxc ldap $target -u \"$s_user\" -p \"$s_pass\" --groups"
+				clog "$C_CYAN" "  nxc ldap $target -u \"$s_user\" -p \"$s_pass\" --active-users"
+				clog "$C_CYAN" "  nxc ldap $target -u \"$s_user\" -p \"$s_pass\" -M laps"
+				;;
+			*)
+				clog "$C_YELLOW" "No predefined interactive client for protocol: $s_proto"
+				clog "$C_CYAN" "You can use nxc: nxc $s_proto $target -u \"$s_user\" -p \"$s_pass\""
+				;;
+			esac
+		else
+			echo "Cancelled or invalid number selected."
+		fi
+	fi
+fi
