@@ -16,7 +16,7 @@ if [[ -t 1 ]]; then
 	C_BOLD='\033[1m'
 	C_RED='\033[1;31m'
 	C_GREEN='\033[1;32m'
-	C_YELLOW='\033[1;33m'
+	C_YELLOW='\033[93m'
 	C_CYAN='\033[1;36m'
 	C_WHITE='\033[1;37m'
 	C_DIM='\033[2m'
@@ -567,16 +567,16 @@ log "${C_DIM}$(printf '%0.s-' $(seq 1 "$_sep_len"))${C_RESET}"
 
 _total=${#rows[@]}
 if ((confirmed > 0)); then
-	log "${C_GREEN}${C_BOLD}  v  confirmed: $confirmed / $_total${C_RESET}"
+	log "${C_GREEN}${C_BOLD}  ✔  confirmed: $confirmed / $_total${C_RESET}"
 else
-	log "${C_DIM}  v  confirmed: $confirmed / $_total${C_RESET}"
+	log "${C_DIM}  ✔  confirmed: $confirmed / $_total${C_RESET}"
 fi
 if ((uncertain > 0)); then
-	log "${C_YELLOW}${C_BOLD}  ?  to verify: $uncertain / $_total${C_RESET}"
+	log "${C_YELLOW}${C_BOLD}  ⚠  to verify: $uncertain / $_total${C_RESET}"
 else
-	log "${C_DIM}  ?  to verify: $uncertain / $_total${C_RESET}"
+	log "${C_DIM}  ⚠  to verify: $uncertain / $_total${C_RESET}"
 fi
-log "${C_DIM}  x  rejected:  $((  _total - confirmed - uncertain  )) / $_total${C_RESET}"
+log "${C_DIM}  ✗  rejected:  $((  _total - confirmed - uncertain  )) / $_total${C_RESET}"
 log ""
 log "${C_DIM}[info]  The meaning of \"[+]\" differs between protocols; verify results manually.${C_RESET}"
 
