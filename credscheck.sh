@@ -16,7 +16,7 @@ if [[ -t 1 ]]; then
 	C_BOLD='\033[1m'
 	C_RED='\033[1;31m'
 	C_GREEN='\033[1;32m'
-	C_YELLOW='\033[93m'
+	C_YELLOW='\033[93m' # bright yellow (SGR 93), intentionally not bold (\033[1;33m) for a clearer, more vibrant hue
 	C_CYAN='\033[1;36m'
 	C_WHITE='\033[1;37m'
 	C_DIM='\033[2m'
@@ -58,10 +58,9 @@ Examples:
 HELP
 }
 
-# BUG FIX: check only $2, not total $# — so ./credscheck.sh -t -u admin
-# no longer silently sets target="-u".
 need_value() {
-	if [[ -z "${2:-}" ]]; then
+	# $1 = flag name, $2 = $# from call site (ensures argument was provided, allows empty string like -p "")
+	if (($2 < 2)); then
 		echo "Error: $1 requires a value." >&2
 		exit 1
 	fi
@@ -69,49 +68,49 @@ need_value() {
 while (($#)); do
 	case "$1" in
 	-t | --target)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		target="$2"
 		shift 2
 		;;
 	-u | --user)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		user="$2"
 		user_set=1
 		shift 2
 		;;
 	-p | --pass)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		pass="$2"
 		pass_set=1
 		shift 2
 		;;
 	-m | --max-attempts)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		max_attempts="$2"
 		shift 2
 		;;
 	--delay-min)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		delay_min="$2"
 		shift 2
 		;;
 	--delay-max)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		delay_max="$2"
 		shift 2
 		;;
 	--protocols)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		protocols_arg="$2"
 		shift 2
 		;;
 	-o | --output)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		output_file="$2"
 		shift 2
 		;;
 	--timeout)
-		need_value "$1" "${2:-}"
+		need_value "$1" $#
 		nxc_timeout="$2"
 		shift 2
 		;;
@@ -212,6 +211,8 @@ if [[ -n "$output_file" ]]; then
 fi
 
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' <<<"$1"; }
+# %b is intentionally used below so embedded ANSI escape sequences (colors/formatting)
+# are interpreted when printing to the terminal.
 log() {
 	printf '%b\n' "$1"
 	[[ -n "$output_file" ]] && printf '%s\n' "$(strip_ansi "$1")" >>"$output_file"
@@ -429,7 +430,9 @@ for proto in "${protocols[@]}"; do
 		# Only on a real terminal; in redirected/piped output fall back to a
 		# plain header line so that log files are still readable.
 		creds_display="${u:-<empty>}:${pm}"
-		attempt_tag="$(printf '[%02d/%02d]' "$attempt" "$run_count")"
+		tag_w=${#run_count}
+		((tag_w < 2)) && tag_w=2
+		attempt_tag="$(printf '[%0*d/%0*d]' "$tag_w" "$attempt" "$tag_w" "$run_count")"
 		if [[ -t 1 ]]; then
 			printf '\r\033[K%b' "${C_DIM}${attempt_tag} ${proto}  ${creds_display} ...${probe_note}${C_RESET}"
 		else
@@ -500,6 +503,7 @@ for proto in "${protocols[@]}"; do
 		esac
 		if [[ -t 1 ]]; then
 			printf '\r\033[K%b\n' "${_color}${_line_plain}${C_RESET}"
+			[[ -n "$output_file" ]] && printf '%s\n' "$_line_plain" >>"$output_file"
 		else
 			log "${_color}${_line_plain}${C_RESET}"
 		fi
@@ -588,7 +592,7 @@ for i in "${!raw_statuses[@]}"; do
 	fi
 done
 
-if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
+if (( ${#raw_statuses[@]} > 0 && no_launch == 0 )); then
 	launch_choice="n"
 	if ((${#valid_indices[@]} > 0)); then
 		echo ""
@@ -651,6 +655,8 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 			echo ""
 			_info "Selected: protocol $s_proto for target $target (user: ${s_user:-<empty>})"
 
+			# Interactive client sessions use 'exec' to replace the script process directly,
+			# avoiding idle parent shell processes or signal forwarding issues.
 			case "$s_proto" in
 			rdp)
 				if command -v xfreerdp >/dev/null 2>&1; then
@@ -680,9 +686,9 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				if [[ -n "$s_pass" ]] && command -v sshpass >/dev/null 2>&1; then
 					_ok "Launching ssh + sshpass (password supplied automatically)..."
 					if [[ -n "$s_user" ]]; then
-						sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "${s_user}@${target}"
+						exec sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "${s_user}@${target}"
 					else
-						sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "$target"
+						exec sshpass -p "$s_pass" ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no "$target"
 					fi
 				elif command -v ssh >/dev/null 2>&1; then
 					if [[ -n "$s_pass" ]]; then
@@ -692,9 +698,9 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 					fi
 					_ok "Launching ssh (type the password manually)..."
 					if [[ -n "$s_user" ]]; then
-						ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "${s_user}@${target}"
+						exec ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "${s_user}@${target}"
 					else
-						ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "$target"
+						exec ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "$target"
 					fi
 				else
 					_err "'ssh' not found in PATH."
@@ -723,9 +729,9 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 					if [[ -n "$smb_share" ]]; then
 						_ok "Launching an interactive smbclient session for //$target/$smb_share..."
 						if ((smb_has_pass_flag)); then
-							smbclient "//$target/$smb_share" -U "$s_user" --password="$s_pass"
+							exec smbclient "//$target/$smb_share" -U "$s_user" --password="$s_pass"
 						else
-							smbclient "//$target/$smb_share" -U "$s_user%$s_pass"
+							exec smbclient "//$target/$smb_share" -U "$s_user%$s_pass"
 						fi
 					fi
 				else
@@ -754,12 +760,12 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 						if [[ "$s_pass" == *","* ]]; then
 							# When the password contains a comma, the -u user,pass switch misparses it.
 							# lftp's 'user' command takes separate arguments and handles commas correctly.
-							lftp -e "${lftp_tune} user \"${s_user//\"/\\\"}\" \"${s_pass//\"/\\\"}\";" "$target"
+							exec lftp -e "${lftp_tune} user \"${s_user//\"/\\\"}\" \"${s_pass//\"/\\\"}\";" "$target"
 						else
-							lftp -u "$s_user","$s_pass" -e "$lftp_tune" "$target"
+							exec lftp -u "$s_user","$s_pass" -e "$lftp_tune" "$target"
 						fi
 					else
-						lftp -e "$lftp_tune" "$target"
+						exec lftp -e "$lftp_tune" "$target"
 					fi
 				fi
 				;;
@@ -767,7 +773,7 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				if command -v vncviewer >/dev/null 2>&1; then
 					_ok "Launching vncviewer..."
 					# Most vncviewer builds will prompt for the password interactively anyway
-					vncviewer "$target"
+					exec vncviewer "$target"
 				else
 					_err "'vncviewer' not found in PATH."
 					_warn "Install it with: sudo apt install tigervnc-viewer"
@@ -777,9 +783,9 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				if command -v evil-winrm >/dev/null 2>&1; then
 					_ok "Launching evil-winrm..."
 					if [[ -n "$s_pass" ]]; then
-						evil-winrm -i "$target" -u "$s_user" -p "$s_pass"
+						exec evil-winrm -i "$target" -u "$s_user" -p "$s_pass"
 					else
-						evil-winrm -i "$target" -u "$s_user"
+						exec evil-winrm -i "$target" -u "$s_user"
 					fi
 				else
 					_err "'evil-winrm' not found in PATH."
@@ -801,7 +807,7 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 						_warn "Note: password contains ':' - the user:pass@host format may break."
 						_warn "Consider doing it manually: $cmd_mssql '$s_user'@$target (and enter the password)"
 					fi
-					"$cmd_mssql" "${s_user}:${s_pass}@${target}"
+					exec "$cmd_mssql" "${s_user}:${s_pass}@${target}"
 				else
 					_err "Neither 'impacket-mssqlclient' nor 'mssqlclient.py' found in PATH."
 					_warn "Install the Impacket package: sudo apt install python3-impacket (or pipx install impacket)"
@@ -818,9 +824,9 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				if [[ -n "$cmd_wmi" ]]; then
 					_ok "Launching $cmd_wmi..."
 					if [[ -n "$s_pass" ]]; then
-						"$cmd_wmi" "${s_user}:${s_pass}@${target}"
+						exec "$cmd_wmi" "${s_user}:${s_pass}@${target}"
 					else
-						"$cmd_wmi" "${s_user}@${target}"
+						exec "$cmd_wmi" "${s_user}@${target}"
 					fi
 				else
 					_err "Neither 'impacket-wmiexec' nor 'wmiexec.py' found in PATH."
@@ -828,6 +834,7 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				fi
 				;;
 			nfs)
+				# Note: deliberately not using exec because mount instructions follow below.
 				if command -v showmount >/dev/null 2>&1; then
 					_ok "Fetching the NFS share list (showmount -e $target)..."
 					showmount -e "$target"
@@ -840,6 +847,7 @@ if ((${#raw_statuses[@]} > 0)) && ((no_launch == 0)); then
 				fi
 				;;
 			ldap)
+				# Note: deliberately not using exec because follow-up module hints follow below.
 				_ok "Querying the domain controller via NetExec LDAP (--users)..."
 				nxc ldap "$target" -u "$s_user" -p "$s_pass" --users
 				echo ""
