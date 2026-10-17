@@ -9,7 +9,7 @@ Nmap.
 1. Runs a quick Nmap TCP scan limited to the ports of the protocols you
    asked for, so nxc is never called against a closed port.
 2. For each open protocol, runs `nxc` with either the credentials you
-   supplied, or a blind-test set (`anonymous`/`guest`/`null`/empty), with a
+   supplied, or a blind-test set (`anonymous`/`guest`/empty), with a
    couple of sane adjustments:
    - **SSH / WinRM / RDP** don't have a concept of an "anonymous" login, so
      in blind mode they only get a single availability probe instead of a
@@ -60,7 +60,7 @@ chmod +x credscheck.sh
 ## Usage
 
 ```bash
-# Blind test (anonymous/guest/null) on all supported protocols
+# Blind test (anonymous/guest/empty) on all supported protocols
 ./credscheck.sh -t 10.10.11.123
 
 # Specific credentials

@@ -287,10 +287,10 @@ done
 }
 protocols=("${active_protocols[@]}")
 
-# Protocols where anonymous/guest/null make no protocol-level sense
+# Protocols where anonymous/guest/empty make no protocol-level sense
 # (SSH/WinRM/RDP require a real account - there is no concept of an "anonymous
 # login" for them). In blind mode they only get a single availability probe
-# instead of the full list of 6 attempts, which have no real chance of
+# instead of the full list of 5 attempts, which have no real chance of
 # succeeding except by pure coincidence of a misconfiguration.
 declare -A blind_minimal=([ssh]=1 [winrm]=1 [rdp]=1)
 
@@ -304,7 +304,7 @@ declare -A extra_defaults=([mssql]="sa:sa sa: sa:Password123 sa:admin")
 if ((user_set)); then
 	mode="Test of supplied credentials"
 else
-	mode="Test anonymous/guest/null (SSH/WinRM/RDP: availability probe only)"
+	mode="Test anonymous/guest/empty (SSH/WinRM/RDP: availability probe only)"
 fi
 
 get_creds_for_proto() {
@@ -316,8 +316,8 @@ get_creds_for_proto() {
 		proto_users=("")
 		proto_passwords=("")
 	else
-		proto_users=(anonymous anonymous "" guest guest null)
-		proto_passwords=(anonymous "" "" guest "" null)
+		proto_users=(anonymous anonymous "" guest guest)
+		proto_passwords=(anonymous "" "" guest "")
 		if [[ -n "${extra_defaults[$proto]:-}" ]]; then
 			local pair u2 p2
 			for pair in ${extra_defaults[$proto]}; do
